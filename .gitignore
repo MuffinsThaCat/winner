@@ -1,0 +1,45 @@
+# Build artifacts
+target/
+*.tar.gz
+*.zip
+
+# Local data
+data_100k/
+data_bdf/
+stats/
+
+# Old implementations
+williams_impl/
+williams_impl_final/
+williams_impl_final_working/
+williams_impl_fixed/
+williams_revm/
+
+# Scripts not needed for submission
+azure_commands.sh
+create_williams_project.sh
+download_bigquery_blocks.py
+download_no_auth.py
+prove_victory.py
+run_baseline.sh
+run_benchmark_on_azure.sh
+setup_vm.sh
+upload_to_azure.sh
+test_classifier.py
+analyze_all_threads.py
+analyze_dataset.py
+
+# Working files
+BATTLE_PLAN.md
+PROGRESS.md
+STATUS.md
+FINAL_STATUS.txt
+MATHEMATICAL_PROOF.md
+VERIFICATION_INSTRUCTIONS.md
+DOWNLOAD_INSTRUCTIONS.md
+classifier_results.txt
+dataset_analysis.txt
+
+# Backup files
+*.bak
+*_backup.rs
