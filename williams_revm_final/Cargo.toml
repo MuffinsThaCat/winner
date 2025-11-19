@@ -1,0 +1,20 @@
+[package]
+name = "williams-executor"
+version = "1.0.0"
+edition = "2021"
+authors = ["Williams SupraEVM Challenge Team"]
+description = "Williams Hybrid Executor - Checkpointing + Parallel Execution for EVM"
+
+[dependencies]
+revm = { version = "14", default-features = false, features = ["std", "serde"] }
+alloy-primitives = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rayon = "1.10"
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1.0"
+
+[[bin]]
+name = "williams-benchmark"
+path = "src/main.rs"
