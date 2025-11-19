@@ -356,7 +356,24 @@ As block size increases:
 
 ## License
 
-MIT License (for open-source requirement compliance)
+**RESTRICTIVE LICENSE - Verification Only**
+
+This software is provided under a restrictive license that permits:
+- Verification of bounty claims
+- Performance testing for verification purposes
+- Code review by SupraEVM team
+
+But **PROHIBITS** until bounty payment:
+- Commercial use
+- Integration into products
+- Creating derivative works
+- Distribution to third parties
+
+**Full license terms:** See `LICENSE.md`
+
+**After bounty payment ($1M or $250K), licensing terms will be negotiated.**
+
+This protects our intellectual property while allowing full verification of our submission.
 
 ---
 
