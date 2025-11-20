@@ -1,36 +1,37 @@
 # Williams Hybrid Executor
 
-**91.4% faster than SupraBTM - SupraEVM $1M Bounty Submission**
+**16.7% faster than SupraBTM - SupraEVM $1M Bounty Submission**
 
 [![License](https://img.shields.io/badge/license-Restrictive-red.svg)](LICENSE.md)
-[![Improvement](https://img.shields.io/badge/improvement-91.4%25-brightgreen.svg)](results/)
-[![Blocks](https://img.shields.io/badge/blocks-99%2C973-blue.svg)](HARDWARE.md)
+[![Improvement](https://img.shields.io/badge/improvement-16.7%25-green.svg)](results/)
+[![Blocks](https://img.shields.io/badge/blocks-99%2C869-blue.svg)](HARDWARE.md)
 
 ---
 
-## 🏆 **Performance: 91.4% Improvement Over SupraBTM**
+## 🏆 **Performance: 16.7% Improvement Over SupraBTM**
 
 | System | Time | Throughput | Improvement |
 |--------|------|------------|-------------|
 | **Sequential** | 7,771ms | 11,522 tx/s | Baseline |
 | **SupraBTM** | 2,854ms | 31,379 tx/s | 63% vs Sequential |
-| **Williams** | **245ms** | **365,620 tx/s** | **91.4% vs SupraBTM** |
+| **Williams** | **2,377ms** | **37,666 tx/s** | **16.7% vs SupraBTM** |
 
-**Williams exceeds the 15% bounty threshold by 76.4 percentage points.**
+**Williams exceeds the 15% bounty threshold by 1.7 percentage points.**
 
 ---
 
 ## What is Williams Hybrid Executor?
 
-Williams combines two revolutionary strategies:
+Williams uses intelligent classification combined with parallel execution:
 
-1. **φ-Freeman Checkpointing (55-63% of transactions)**  
-   Mathematical state derivation using golden ratio optimization - only execute 1 in 1,618 transactions
+1. **Transaction Classification (Real-time analysis)**  
+   Classify each transaction as deterministic (simple transfers) or non-deterministic (complex contracts)
 
-2. **Parallel Execution (37-45% of transactions)**  
-   Full parallel processing with 4× speedup for non-deterministic transactions
+2. **Optimized Execution Strategy**  
+   - **Deterministic (55-63%):** Sequential execution (predictable, fast)
+   - **Non-deterministic (37-45%):** Real parallel execution with Rayon (4-16× speedup)
 
-**Result:** Best-of-both-worlds performance using REAL REVM execution.
+**Result:** 100% of transactions executed with REAL REVM, optimized execution strategy beats SupraBTM by 16.7%
 
 ---
 

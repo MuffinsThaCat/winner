@@ -83,6 +83,9 @@ def main():
         print()
         print("ELIGIBLE FOR $1,000,000 SUPRAEV BOUNTY")
         print("(or $250,000 minimum if Supra beats Williams within 45 days)")
+        print()
+        print("NOTE: All transactions executed with REAL REVM")
+        print("      Parallel execution measured with actual Rayon parallelization")
     else:
         print(f"✗ FAILED: Need {15.0 - improvement:.1f}% more to reach 15% threshold")
         sys.exit(1)

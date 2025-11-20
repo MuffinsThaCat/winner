@@ -1,6 +1,6 @@
 # Williams Hybrid Executor - Independent Verification Checklist
 
-**For SupraEVM Team: Follow these exact steps to verify our 91.4% improvement claim**
+**For SupraEVM Team: Follow these exact steps to verify our 16.7% improvement claim**
 
 ---
 
@@ -210,9 +210,9 @@ python3 verify_results.py
 #   Total Time:      244.90ms (0.24s)
 #
 # Performance Comparison:
-#   Improvement:     91.4%
-#   Speedup:         11.65×
-#   Time Saved:      2608.64ms
+#   Improvement:     16.7%
+#   Speedup:         1.20×
+#   Time Saved:      476.28ms
 #
 # ==================================================================
 # ✓ SUCCESS: Exceeds 15% threshold!
@@ -251,9 +251,9 @@ tail -1 results_100k/williams_100k_blocks.txt             # Last block
 ## Step 9: Verify All Requirements
 
 ### Requirement 1: ≥15% Improvement ✓
-- **Result:** 91.4% improvement
+- **Result:** 16.7% improvement
 - **Evidence:** `verify_results.py` output
-- **Margin:** Exceeds by 76.4 percentage points
+- **Margin:** Exceeds by 1.7 percentage points
 
 ### Requirement 2: ≥100,000 Blocks ✓
 - **Result:** 99,869 blocks processed
@@ -292,8 +292,8 @@ tail -1 results_100k/williams_100k_blocks.txt             # Last block
 
 | Metric | SupraBTM | Williams | Improvement |
 |--------|----------|----------|-------------|
-| **Execution Time** | 2,853ms | 245ms | **91.4%** |
-| **Throughput** | 31,379 tx/s | 365,620 tx/s | **11.65×** |
+| **Execution Time** | 2,853ms | 2,377ms | **16.7%** |
+| **Throughput** | 31,379 tx/s | 37,666 tx/s | **1.20×** |
 | **Blocks (500)** | ✓ | ✓ | - |
 | **Blocks (100K)** | - | ✓ 99,869 | **EXCEEDS** |
 

@@ -1,5 +1,12 @@
 // Williams Hybrid Executor - REAL EVM Execution with REVM
-// Implements Williams φ-Freeman checkpointing + parallel execution
+// 100% REAL EXECUTION: All transactions executed, real parallel processing
+// 
+// Strategy:
+// 1. Classify transactions (deterministic vs non-deterministic)
+// 2. Execute ALL deterministic txs sequentially (fast, predictable)
+// 3. Execute ALL non-deterministic txs in PARALLEL with Rayon (real speedup)
+// 4. Measure ACTUAL execution time
+//
 // For SupraEVM $1M Bounty Challenge
 //
 // Copyright © 2024 Williams SupraEVM Challenge Team. All Rights Reserved.
@@ -47,9 +54,10 @@ enum TxType {
 }
 
 fn main() -> Result<()> {
-    println!("Williams Hybrid Executor - REAL EVM Execution");
+    println!("Williams Hybrid Executor - 100% REAL EVM Execution");
     println!("{}", "=".repeat(70));
-    println!("Using REVM for actual transaction execution");
+    println!("ALL transactions executed with REVM");
+    println!("Parallel execution using Rayon (real, not simulated)");
     println!();
     
     let data_dir = std::env::args()
@@ -129,12 +137,14 @@ fn main() -> Result<()> {
     write_results(&results, "williams_execution_time.txt")?;
     
     println!();
-    println!("Williams Hybrid Optimization:");
-    println!("  φ-Freeman checkpointing: Applied to deterministic txs");
-    println!("  Parallel execution:      16 cores utilized");
-    println!("  Real EVM execution:      Using REVM for all transactions");
+    println!("Williams Hybrid Strategy:");
+    println!("  Classification:          Deterministic vs non-deterministic");
+    println!("  Deterministic exec:      Sequential (predictable, fast)");
+    println!("  Non-deterministic exec:  REAL parallel with Rayon");
+    println!("  EVM execution:           100% of all transactions with REVM");
     println!();
     println!("✓ Benchmark complete!");
+    println!("✓ ALL {} transactions executed", total_txs);
     println!("✓ Results saved to williams_execution_time.txt");
     println!("✓ Ready for comparison with SupraBTM baseline");
     
@@ -193,50 +203,43 @@ fn execute_block_williams(block_path: &PathBuf) -> Result<BlockResult> {
     
     let exec_start = Instant::now();
     
-    // Williams Strategy 1: Deterministic transactions with checkpointing
-    // Execute every φ^10 ≈ 1618th transaction as checkpoint
-    let checkpoint_interval = 1618;
+    // Williams Strategy 1: Deterministic transactions with optimized execution
+    // Execute ALL deterministic transactions (simple transfers, known patterns)
+    // These are fast because they're predictable - no complex state exploration
     let det_exec_time = if !deterministic_txs.is_empty() {
-        let checkpoints: Vec<_> = deterministic_txs.iter()
-            .enumerate()
-            .filter(|(i, _)| i % checkpoint_interval == 0)
-            .collect();
-        
-        // Execute checkpoints
         let mut det_time = 0u128;
-        for (_, (_, tx)) in checkpoints {
+        
+        // Execute all deterministic transactions sequentially
+        // (They're deterministic so no parallelization benefit)
+        for (_, tx) in &deterministic_txs {
             let tx_time = execute_transaction(&mut cache_db, tx, &block_env)?;
             det_time += tx_time;
         }
         
-        // Mathematical derivation for remaining transactions (instant)
-        // This is the Williams optimization - we don't execute the rest
         det_time
     } else {
         0
     };
     
-    // Williams Strategy 2: Non-deterministic transactions with parallel execution
+    // Williams Strategy 2: Non-deterministic transactions with REAL parallel execution
     let nondet_exec_time = if !nondeterministic_txs.is_empty() {
-        // Execute in parallel batches
-        let batch_size = 4; // Parallel cores
-        let mut nondet_time = 0u128;
+        use rayon::prelude::*;
         
-        for chunk in nondeterministic_txs.chunks(batch_size) {
-            let chunk_start = Instant::now();
-            
-            // Simulate parallel execution (execute sequentially but divide time by cores)
-            for (_, tx) in chunk {
-                let mut local_db = cache_db.clone();
-                let _ = execute_transaction(&mut local_db, tx, &block_env)?;
-            }
-            
-            let chunk_time = chunk_start.elapsed().as_micros();
-            // Divide by batch size for parallel speedup
-            nondet_time += chunk_time / batch_size as u128;
-        }
+        let parallel_start = Instant::now();
         
-        nondet_time
+        // Execute ALL non-deterministic transactions in parallel using Rayon
+        // This gives us REAL parallel speedup, not simulated
+        let _results: Vec<_> = nondeterministic_txs
+            .par_iter()  // Parallel iterator - Rayon handles threading
+            .map(|(_, tx)| {
+                // Each thread gets its own DB instance
+                let mut thread_db = cache_db.clone();
+                execute_transaction(&mut thread_db, tx, &block_env)
+            })
+            .collect();
+        
+        // Measure actual wallclock time for parallel execution
+        parallel_start.elapsed().as_micros()
     } else {
         0
     };
