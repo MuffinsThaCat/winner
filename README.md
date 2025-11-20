@@ -1,14 +1,14 @@
 # Williams Hybrid Executor
 
-**82-88% faster than SupraBTM - SupraEVM $1M Bounty Submission**
+**84.7% Average Improvement - SupraEVM Bounty Submission ($40K USDC + $1M Tokens)**
 
 [![License](https://img.shields.io/badge/license-Restrictive-red.svg)](LICENSE.md)
 [![Improvement](https://img.shields.io/badge/improvement-82--88%25-brightgreen.svg)](results/)
-[![Blocks](https://img.shields.io/badge/blocks-99%2C869-blue.svg)](HARDWARE.md)
+[![Blocks](https://img.shields.io/badge/blocks-100%2C069-blue.svg)](HARDWARE.md)
 
 ---
 
-## 🏆 **Performance: 82-88% Improvement Over SupraBTM**
+## 🏆 **Performance: 84.7% Average Improvement Over SupraBTM**
 
 ### **Multi-Configuration Results (Bounty Requirement)**
 
@@ -19,7 +19,7 @@
 | **16 threads** | **504.60ms** | 2,853.54ms | 177,449 tx/s | **82.3%** ✅ |
 | **Overall Average** | **435.66ms** | 2,853.54ms | **210,208 tx/s** | **84.7%** ✅ |
 
-**Williams exceeds the 15% bounty threshold by 67-73 percentage points across ALL configurations.**
+**Williams exceeds the 15% bounty threshold by 69.7 percentage points (84.7% average improvement).**
 
 ---
 

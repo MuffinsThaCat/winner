@@ -1,8 +1,8 @@
-# Williams Hybrid Executor - SupraEVM $1M Bounty Submission
+# Williams Hybrid Executor - SupraEVM Bounty Submission ($40K USDC + $1M Tokens)
 
 ## Executive Summary
 
-**Williams Hybrid Executor achieves 82-88% performance improvement over SupraBTM across all required thread configurations**, exceeding the 15% threshold requirement by 67-73 percentage points.
+**Williams Hybrid Executor achieves 84.7% average performance improvement over SupraBTM across all required thread configurations**, exceeding the 15% threshold requirement by 69.7 percentage points.
 
 **Key Achievements:**
 - ✅ **84.2%** improvement at 4 threads
@@ -75,7 +75,7 @@ sudo docker run --rm --cpuset-cpus="0-15" \
 ## Verification Checklist
 
 ### ✅ Requirement 1: Faster than SupraBTM by 15%+
-**Status:** **PASSED - 82-88% improvement across ALL configurations**
+**Status:** **PASSED - 84.7% average improvement across ALL configurations**
 
 Official benchmark (500 Ethereum blocks, 89,541 transactions):
 
