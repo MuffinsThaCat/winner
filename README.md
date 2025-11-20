@@ -1,24 +1,24 @@
 # Williams Hybrid Executor
 
-**81-87% faster than SupraBTM - SupraEVM $1M Bounty Submission**
+**82-88% faster than SupraBTM - SupraEVM $1M Bounty Submission**
 
 [![License](https://img.shields.io/badge/license-Restrictive-red.svg)](LICENSE.md)
-[![Improvement](https://img.shields.io/badge/improvement-81--87%25-brightgreen.svg)](results/)
+[![Improvement](https://img.shields.io/badge/improvement-82--88%25-brightgreen.svg)](results/)
 [![Blocks](https://img.shields.io/badge/blocks-99%2C869-blue.svg)](HARDWARE.md)
 
 ---
 
-## 🏆 **Performance: 81-87% Improvement Over SupraBTM**
+## 🏆 **Performance: 82-88% Improvement Over SupraBTM**
 
 ### **Multi-Configuration Results (Bounty Requirement)**
 
 | Threads | Williams Time | SupraBTM Time | Throughput | Improvement |
 |---------|---------------|---------------|------------|-------------|
-| **4 threads** | **459.21ms** | 2,853.54ms | 194,988 tx/s | **83.9%** ✅ |
-| **8 threads** | **367.67ms** | 2,853.54ms | 243,540 tx/s | **87.1%** ✅ |
-| **16 threads** | **530.54ms** | 2,853.54ms | 168,773 tx/s | **81.4%** ✅ |
+| **4 threads** | **450.37ms** | 2,853.54ms | 198,815 tx/s | **84.2%** ✅ |
+| **8 threads** | **352.02ms** | 2,853.54ms | 254,360 tx/s | **87.7%** ✅ |
+| **16 threads** | **504.60ms** | 2,853.54ms | 177,449 tx/s | **82.3%** ✅ |
 
-**Williams exceeds the 15% bounty threshold by 66-72 percentage points across ALL configurations.**
+**Williams exceeds the 15% bounty threshold by 67-73 percentage points across ALL configurations.**
 
 ---
 

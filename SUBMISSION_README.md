@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-**Williams Hybrid Executor achieves 81-87% performance improvement over SupraBTM across all required thread configurations**, exceeding the 15% threshold requirement by 66-72 percentage points.
+**Williams Hybrid Executor achieves 82-88% performance improvement over SupraBTM across all required thread configurations**, exceeding the 15% threshold requirement by 67-73 percentage points.
 
 **Key Achievements:**
-- ✅ **83.9%** improvement at 4 threads
-- ✅ **87.1%** improvement at 8 threads (optimal)
-- ✅ **81.4%** improvement at 16 threads
+- ✅ **84.2%** improvement at 4 threads
+- ✅ **87.7%** improvement at 8 threads (optimal)
+- ✅ **82.3%** improvement at 16 threads
 - ✅ 100% of transactions executed with REAL REVM in PARALLEL
 - ✅ Full parallelization of both deterministic and non-deterministic transactions
 - ✅ Explicit thread pool management per bounty requirements
@@ -16,7 +16,7 @@
 
 ## Quick Verification (30 minutes)
 
-To independently verify our 81-87% improvement claim:
+To independently verify our 82-88% improvement claim:
 
 ```bash
 # 1. Clone and build
@@ -39,7 +39,7 @@ cd williams_revm_final
 
 # Test 8 threads
 ./target/release/williams-benchmark ../data_bdf 8
-# Expected: ~368ms for 89,541 transactions (87.1% improvement)
+# Expected: ~352ms for 89,541 transactions (87.7% improvement)
 
 # Test 16 threads
 ./target/release/williams-benchmark ../data_bdf 16
@@ -59,9 +59,9 @@ sudo docker run --rm --cpuset-cpus="0-15" \
 
 | Configuration | Williams | SupraBTM | Improvement |
 |---------------|----------|----------|-------------|
-| 4 threads | ~459ms | 2,853ms | **83.9%** |
-| 8 threads | ~368ms | 2,853ms | **87.1%** |
-| 16 threads | ~531ms | 2,853ms | **81.4%** |
+| 4 threads | ~450ms | 2,853ms | **84.2%** |
+| 8 threads | ~352ms | 2,853ms | **87.7%** |
+| 16 threads | ~505ms | 2,853ms | **82.3%** |
 
 **What gets executed:**
 - ALL 89,541 transactions run through REVM at each configuration
@@ -75,15 +75,15 @@ sudo docker run --rm --cpuset-cpus="0-15" \
 ## Verification Checklist
 
 ### ✅ Requirement 1: Faster than SupraBTM by 15%+
-**Status:** **PASSED - 81-87% improvement across ALL configurations**
+**Status:** **PASSED - 82-88% improvement across ALL configurations**
 
 Official benchmark (500 Ethereum blocks, 89,541 transactions):
 
 | Thread Config | Williams | SupraBTM | Improvement |
 |---------------|----------|----------|-------------|
-| 4 threads | 459.21ms | 2,853.54ms | **83.9%** ✅ |
-| 8 threads | 367.67ms | 2,853.54ms | **87.1%** ✅ |
-| 16 threads | 530.54ms | 2,853.54ms | **81.4%** ✅ |
+| 4 threads | 450.37ms | 2,853.54ms | **84.2%** ✅ |
+| 8 threads | 352.02ms | 2,853.54ms | **87.7%** ✅ |
+| 16 threads | 504.60ms | 2,853.54ms | **82.3%** ✅ |
 
 **All 89,541 transactions executed with REVM in PARALLEL at each configuration. Both deterministic and non-deterministic transactions fully parallelized with explicit thread pools.**
 
