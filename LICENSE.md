@@ -29,15 +29,25 @@ The following actions are **PERMITTED**:
 - **Review**: Reviewing the source code to understand the implementation
 - **Academic Study**: Studying the Software for non-commercial academic research purposes with proper attribution
 
-### 4. Bounty Claim Protection
+### 4. Post-Payment License Grant
 
-This license remains in effect until one of the following conditions is met:
+Upon full payment of the SupraEVM bounty, this license automatically converts to grant SupraEVM the following rights:
 
-1. **Full Bounty Payment**: The SupraEVM team pays the full $1,000,000 bounty to the copyright holders
-2. **Partial Bounty Payment**: The SupraEVM team pays the $250,000 minimum bounty (if they reclaim performance within 45 days)
-3. **Negotiated Agreement**: A separate licensing agreement is negotiated and executed between the parties
+**If Full Bounty Paid ($40,000 USDC + $1,000,000 in tokens):**
 
-Upon satisfaction of bounty payment, the copyright holders will issue a new license or negotiate licensing terms for the Software.
+SupraEVM receives a **perpetual, worldwide, non-exclusive, royalty-free license** to:
+- Use the Software in their products and services
+- Modify and create derivative works
+- Integrate the algorithms into their systems
+- Use for commercial purposes
+- Distribute as part of their platform
+
+**Restrictions after payment:**
+- SupraEVM may NOT sublicense or resell the Software as a standalone product
+- Copyright and attribution must be maintained in derivative works
+- Original copyright holders retain all rights to license to other parties
+
+**No payment = No license beyond verification purposes as specified above.**
 
 ### 5. Independent Verification
 
@@ -57,10 +67,10 @@ This verification license **does NOT grant rights** to:
 
 The Williams Hybrid Executor, including but not limited to:
 
-- The φ-Freeman checkpointing algorithm
+- The parallel execution implementation
 - The transaction classification methodology  
-- The hybrid execution strategy
-- The checkpoint interval optimization (φ^10 ≈ 1618)
+- The bulk state prefetching optimization
+- The sharded state tracking implementation
 - All implementation details and optimizations
 
 ...are proprietary intellectual property of the copyright holders and are protected by this license.
@@ -93,17 +103,23 @@ Email: [To be provided upon bounty verification]
 
 ## Summary
 
-**For SupraEVM Verification Team:**
+**Before Bounty Payment:**
 - ✅ You MAY run our code to verify the bounty claims
 - ✅ You MAY review the source code for compliance
 - ❌ You MAY NOT use our algorithms in your products
 - ❌ You MAY NOT distribute or modify the code
 - ❌ You MAY NOT create derivative works
 
-**After bounty payment, we will negotiate appropriate licensing terms.**
+**After Full Bounty Payment ($40K USDC + $1M tokens):**
+- ✅ SupraEVM receives perpetual, royalty-free license
+- ✅ Full rights to use, modify, integrate into products
+- ✅ Commercial use permitted
+- ✅ Can distribute as part of platform
+- ❌ Cannot resell as standalone product
+- ✅ Original authors retain right to license to others
 
 ---
 
-**Date of License:** November 19, 2024  
-**License Version:** 1.0  
+**Date of License:** November 20, 2024  
+**License Version:** 2.0 (Updated with automatic post-payment grant)  
 **Software Version:** Williams Hybrid Executor v1.0.0
