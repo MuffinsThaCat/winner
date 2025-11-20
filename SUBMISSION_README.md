@@ -84,17 +84,19 @@ Official benchmark (500 Ethereum blocks, 89,541 transactions):
 | 4 threads | 450.37ms | 2,853.54ms | **84.2%** ✅ |
 | 8 threads | 352.02ms | 2,853.54ms | **87.7%** ✅ |
 | 16 threads | 504.60ms | 2,853.54ms | **82.3%** ✅ |
+| **Overall Average** | **435.66ms** | 2,853.54ms | **84.7%** ✅ |
 
 **All 89,541 transactions executed with REVM in PARALLEL at each configuration. Both deterministic and non-deterministic transactions fully parallelized with explicit thread pools.**
 
 ### ✅ Requirement 2: Run on Real Ethereum Blocks (≥100,000)
-**Status:** **PASSED - 99,973 blocks**
+**Status:** **PASSED - 100,069 blocks**
 
-Williams executed on 99,973 historical Ethereum blocks:
-- Total transactions: 1,460,585
-- Execution time: 16.43 seconds
-- Throughput: 88,888 tx/s
-- Dataset: Blocks 18,000,000 - 18,199,999
+Williams executed on 100,069 historical Ethereum blocks:
+- Total transactions: 5,846,144
+- Execution time (8 threads, optimal): 62.90 seconds
+- Throughput (8 threads, optimal): 92,940 tx/s
+- Overall average throughput: 79,165 tx/s
+- Dataset: Blocks 18,000,000 - 18,100,199
 
 ### ✅ Requirement 3: Commodity Hardware (≤16 cores)
 **Status:** **PASSED - 16 cores**

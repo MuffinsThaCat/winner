@@ -17,6 +17,7 @@
 | **4 threads** | **450.37ms** | 2,853.54ms | 198,815 tx/s | **84.2%** ✅ |
 | **8 threads** | **352.02ms** | 2,853.54ms | 254,360 tx/s | **87.7%** ✅ |
 | **16 threads** | **504.60ms** | 2,853.54ms | 177,449 tx/s | **82.3%** ✅ |
+| **Overall Average** | **435.66ms** | 2,853.54ms | **210,208 tx/s** | **84.7%** ✅ |
 
 **Williams exceeds the 15% bounty threshold by 67-73 percentage points across ALL configurations.**
 

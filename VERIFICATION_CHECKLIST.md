@@ -295,7 +295,9 @@ tail -1 results_100k/williams_100k_blocks.txt             # Last block
 | **Execution Time (4T)** | 2,853ms | 450ms | **84.2%** |
 | **Execution Time (8T)** | 2,853ms | 352ms | **87.7%** |
 | **Execution Time (16T)** | 2,853ms | 505ms | **82.3%** |
+| **Overall Average** | 2,853ms | 436ms | **84.7%** |
 | **Throughput (optimal)** | 31,379 tx/s | 254,360 tx/s | **8.11×** |
+| **Throughput (average)** | 31,379 tx/s | 210,208 tx/s | **6.70×** |
 | **Blocks (500)** | ✓ | ✓ | - |
 | **Blocks (100K)** | - | ✓ 99,869 | **EXCEEDS** |
 
