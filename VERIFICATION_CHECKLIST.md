@@ -1,6 +1,6 @@
 # Williams Hybrid Executor - Independent Verification Checklist
 
-**For SupraEVM Team: Follow these exact steps to verify our 69-73% improvement claim across all thread configurations**
+**For SupraEVM Team: Follow these exact steps to verify our 81-87% improvement claim across all thread configurations**
 
 ---
 
@@ -210,9 +210,9 @@ python3 verify_results.py
 #   Total Time:      244.90ms (0.24s)
 #
 # Performance Comparison:
-#   4 threads:  880.79ms  (69.1% improvement, 8.82× speedup)
-#   8 threads:  766.12ms  (73.2% improvement, 10.14× speedup)
-#   16 threads: 812.79ms  (71.5% improvement, 9.56× speedup)
+#   4 threads:  459.21ms  (83.9% improvement, 6.21× speedup)
+#   8 threads:  367.67ms  (87.1% improvement, 7.76× speedup)
+#   16 threads: 530.54ms  (81.4% improvement, 5.38× speedup)
 #
 # ==================================================================
 # ✓ SUCCESS: Exceeds 15% threshold!
@@ -251,9 +251,9 @@ tail -1 results_100k/williams_100k_blocks.txt             # Last block
 ## Step 9: Verify All Requirements
 
 ### Requirement 1: ≥15% Improvement ✓
-- **Result:** 69-73% improvement across all configurations
+- **Result:** 81-87% improvement across all configurations
 - **Evidence:** Benchmark results at 4, 8, and 16 threads
-- **Margin:** Exceeds by 54-58 percentage points
+- **Margin:** Exceeds by 66-72 percentage points
 
 ### Requirement 2: ≥100,000 Blocks ✓
 - **Result:** 99,869 blocks processed
@@ -292,10 +292,10 @@ tail -1 results_100k/williams_100k_blocks.txt             # Last block
 
 | Metric | SupraBTM | Williams | Improvement |
 |--------|----------|----------|-------------|
-| **Execution Time (4T)** | 2,853ms | 881ms | **69.1%** |
-| **Execution Time (8T)** | 2,853ms | 766ms | **73.2%** |
-| **Execution Time (16T)** | 2,853ms | 813ms | **71.5%** |
-| **Throughput (optimal)** | 31,379 tx/s | 116,877 tx/s | **10.14×** |
+| **Execution Time (4T)** | 2,853ms | 459ms | **83.9%** |
+| **Execution Time (8T)** | 2,853ms | 368ms | **87.1%** |
+| **Execution Time (16T)** | 2,853ms | 531ms | **81.4%** |
+| **Throughput (optimal)** | 31,379 tx/s | 243,540 tx/s | **7.76×** |
 | **Blocks (500)** | ✓ | ✓ | - |
 | **Blocks (100K)** | - | ✓ 99,869 | **EXCEEDS** |
 

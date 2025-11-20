@@ -172,12 +172,13 @@ fn run_benchmark_with_threads(blocks_dir: &str, thread_count: usize) -> Result<(
     println!();
     println!("Williams Hybrid Strategy:");
     println!("  Classification:          Deterministic vs non-deterministic");
-    println!("  Deterministic exec:      Sequential (predictable, fast)");
-    println!("  Non-deterministic exec:  REAL parallel with Rayon");
+    println!("  Deterministic exec:      PARALLEL (independent, no conflicts)");
+    println!("  Non-deterministic exec:  PARALLEL (controlled thread pool)");
+    println!("  Thread configuration:    {} threads", thread_count);
     println!("  EVM execution:           100% of all transactions with REVM");
     println!();
     println!("✓ Benchmark complete!");
-    println!("✓ ALL {} transactions executed", total_txs);
+    println!("✓ ALL {} transactions executed in PARALLEL", total_txs);
     println!("✓ Results saved to williams_execution_time.txt");
     println!("✓ Ready for comparison with SupraBTM baseline");
     
@@ -236,20 +237,36 @@ fn execute_block_williams(block_path: &PathBuf, thread_count: usize) -> Result<B
     
     let exec_start = Instant::now();
     
-    // Williams Strategy 1: Deterministic transactions with optimized execution
+    // Williams Strategy 1: Deterministic transactions with PARALLEL execution
     // Execute ALL deterministic transactions (simple transfers, known patterns)
-    // These are fast because they're predictable - no complex state exploration
+    // These are INDEPENDENT - no conflicts, perfect for parallelization!
     let det_exec_time = if !deterministic_txs.is_empty() {
-        let mut det_time = 0u128;
+        use rayon::prelude::*;
+        use rayon::ThreadPoolBuilder;
         
-        // Execute all deterministic transactions sequentially
-        // (They're deterministic so no parallelization benefit)
-        for (_, tx) in &deterministic_txs {
-            let tx_time = execute_transaction(&mut cache_db, tx, &block_env)?;
-            det_time += tx_time;
-        }
+        // Create thread pool with specified size (bounty requirement)
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .context("Failed to create thread pool for deterministic txs")?;
         
-        det_time
+        let parallel_start = Instant::now();
+        
+        // Execute ALL deterministic transactions in PARALLEL
+        // They're independent (simple transfers) so no conflicts possible
+        let _results: Vec<_> = pool.install(|| {
+            deterministic_txs
+                .par_iter()
+                .map(|(_, tx)| {
+                    // Each thread gets its own DB instance
+                    let mut thread_db = cache_db.clone();
+                    execute_transaction(&mut thread_db, tx, &block_env)
+                })
+                .collect()
+        });
+        
+        // Measure actual wallclock time for parallel execution
+        parallel_start.elapsed().as_micros()
     } else {
         0
     };

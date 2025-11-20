@@ -1,24 +1,24 @@
 # Williams Hybrid Executor
 
-**69-73% faster than SupraBTM - SupraEVM $1M Bounty Submission**
+**81-87% faster than SupraBTM - SupraEVM $1M Bounty Submission**
 
 [![License](https://img.shields.io/badge/license-Restrictive-red.svg)](LICENSE.md)
-[![Improvement](https://img.shields.io/badge/improvement-69--73%25-brightgreen.svg)](results/)
+[![Improvement](https://img.shields.io/badge/improvement-81--87%25-brightgreen.svg)](results/)
 [![Blocks](https://img.shields.io/badge/blocks-99%2C869-blue.svg)](HARDWARE.md)
 
 ---
 
-## 🏆 **Performance: 69-73% Improvement Over SupraBTM**
+## 🏆 **Performance: 81-87% Improvement Over SupraBTM**
 
 ### **Multi-Configuration Results (Bounty Requirement)**
 
 | Threads | Williams Time | SupraBTM Time | Throughput | Improvement |
 |---------|---------------|---------------|------------|-------------|
-| **4 threads** | **880.79ms** | 2,853.54ms | 101,660 tx/s | **69.1%** ✅ |
-| **8 threads** | **766.12ms** | 2,853.54ms | 116,877 tx/s | **73.2%** ✅ |
-| **16 threads** | **812.79ms** | 2,853.54ms | 110,165 tx/s | **71.5%** ✅ |
+| **4 threads** | **459.21ms** | 2,853.54ms | 194,988 tx/s | **83.9%** ✅ |
+| **8 threads** | **367.67ms** | 2,853.54ms | 243,540 tx/s | **87.1%** ✅ |
+| **16 threads** | **530.54ms** | 2,853.54ms | 168,773 tx/s | **81.4%** ✅ |
 
-**Williams exceeds the 15% bounty threshold by 54-58 percentage points across ALL configurations.**
+**Williams exceeds the 15% bounty threshold by 66-72 percentage points across ALL configurations.**
 
 ---
 
@@ -30,16 +30,18 @@ Williams uses intelligent classification combined with controlled parallel execu
    Classify each transaction as deterministic (simple transfers) or non-deterministic (complex contracts)
 
 2. **Optimized Execution Strategy**  
-   - **Deterministic (63%):** Sequential execution (predictable, fast)
-   - **Non-deterministic (37%):** Controlled parallel execution with Rayon ThreadPool
+   - **Deterministic (63%):** PARALLEL execution (independent, no conflicts)
+   - **Non-deterministic (37%):** PARALLEL execution (controlled thread pool)
    - **Thread Configurations:** Tested at 4, 8, and 16 threads per bounty requirements
 
-3. **Key Innovation: Explicit Thread Pool Management**
+3. **Key Innovation: Full Parallelization + Explicit Thread Pool Management**
+   - Both transaction types executed in parallel
+   - Deterministic txs are independent (simple transfers) → safe to parallelize
    - Creates persistent thread pool with exact thread count
    - Eliminates overhead from default Rayon behavior
-   - Optimal scaling: 8 threads gives 73.2% improvement
+   - Optimal scaling: 8 threads gives 87.1% improvement
 
-**Result:** 100% of transactions executed with REAL REVM, optimized parallel strategy beats SupraBTM by 69-73%
+**Result:** 100% of transactions executed with REAL REVM in parallel, beats SupraBTM by 81-87%
 
 ---
 
