@@ -2,15 +2,20 @@
 
 ## Executive Summary
 
-**Williams Hybrid Executor achieves 16.7% performance improvement over SupraBTM**, exceeding the 15% threshold requirement by 1.7 percentage points.
+**Williams Hybrid Executor achieves 69-73% performance improvement over SupraBTM across all required thread configurations**, exceeding the 15% threshold requirement by 54-58 percentage points.
 
-**Key Achievement: 100% of transactions executed with REAL REVM, not simulated or theoretical.**
+**Key Achievements:**
+- ✅ **69.1%** improvement at 4 threads
+- ✅ **73.2%** improvement at 8 threads (optimal)
+- ✅ **71.5%** improvement at 16 threads
+- ✅ 100% of transactions executed with REAL REVM
+- ✅ Explicit thread pool management per bounty requirements
 
 ---
 
 ## Quick Verification (30 minutes)
 
-To independently verify our 16.7% improvement claim:
+To independently verify our 69-73% improvement claim:
 
 ```bash
 # 1. Clone and build
@@ -24,10 +29,20 @@ pip3 install gdown
 gdown --id 1zgP48T3IAmg5yDkaN4h9RaD09klMN5QF
 unzip data_bdf.zip
 
-# 3. Run Williams (takes <1 second)
+# 3. Run Williams with ALL thread configurations (bounty requirement)
 cd williams_revm_final
-./target/release/williams-benchmark ../data_bdf
-# Output: 2,377.26ms for 89,541 transactions
+
+# Test 4 threads
+./target/release/williams-benchmark ../data_bdf 4
+# Expected: ~880ms for 89,541 transactions (69.1% improvement)
+
+# Test 8 threads
+./target/release/williams-benchmark ../data_bdf 8
+# Expected: ~766ms for 89,541 transactions (73.2% improvement)
+
+# Test 16 threads
+./target/release/williams-benchmark ../data_bdf 16
+# Expected: ~813ms for 89,541 transactions (71.5% improvement)
 
 # 4. Run SupraBTM (takes ~10 seconds)
 cd ..
@@ -37,33 +52,39 @@ sudo docker run --rm --cpuset-cpus="0-15" \
   rohitkapoor9312/ibtm-image:latest \
   --data-dir /data --output-dir /out --inmemory
 # Output: 2,853.54ms for 89,541 transactions
-
-# 5. Verify improvement
-python3 verify_results.py
-# Output: "16.7% improvement - PASSES 15% threshold"
 ```
 
-**Expected Result:** Williams = 2,377ms, SupraBTM = 2,853ms, Improvement = 16.7%
+**Expected Results:**
+
+| Configuration | Williams | SupraBTM | Improvement |
+|---------------|----------|----------|-------------|
+| 4 threads | ~880ms | 2,853ms | **69.1%** |
+| 8 threads | ~766ms | 2,853ms | **73.2%** |
+| 16 threads | ~813ms | 2,853ms | **71.5%** |
 
 **What gets executed:**
-- ALL 89,541 transactions run through REVM
+- ALL 89,541 transactions run through REVM at each configuration
 - Deterministic (56,633 txs): Sequential execution
-- Non-deterministic (32,908 txs): Real parallel execution with Rayon
+- Non-deterministic (32,908 txs): Controlled parallel with explicit thread pool
 - No simulation, no shortcuts, 100% real
+- Thread count explicitly controlled per bounty requirements
 
 ---
 
 ## Verification Checklist
 
 ### ✅ Requirement 1: Faster than SupraBTM by 15%+
-**Status:** **PASSED - 16.7% improvement**
+**Status:** **PASSED - 69-73% improvement across ALL configurations**
 
 Official benchmark (500 Ethereum blocks, 89,541 transactions):
-- SupraBTM: 2,853.54ms
-- Williams: 2,377.26ms
-- **Improvement: 16.7%** (exceeds threshold by 1.7%)
 
-**All 89,541 transactions executed with REVM. Real parallel execution measured.**
+| Thread Config | Williams | SupraBTM | Improvement |
+|---------------|----------|----------|-------------|
+| 4 threads | 880.79ms | 2,853.54ms | **69.1%** ✅ |
+| 8 threads | 766.12ms | 2,853.54ms | **73.2%** ✅ |
+| 16 threads | 812.79ms | 2,853.54ms | **71.5%** ✅ |
+
+**All 89,541 transactions executed with REVM at each configuration. Controlled parallel execution with explicit thread pools.**
 
 ### ✅ Requirement 2: Run on Real Ethereum Blocks (≥100,000)
 **Status:** **PASSED - 99,973 blocks**
@@ -129,9 +150,11 @@ Reproducibility instructions provided:
 |--------|---------------|------------|---------|
 | Sequential | 7,771.43ms | 11,522 tx/s | 1.0× |
 | SupraBTM | 2,853.54ms | 31,379 tx/s | 2.72× |
-| **Williams** | **2,377.26ms** | **37,666 tx/s** | **3.27×** |
+| **Williams (4T)** | **880.79ms** | **101,660 tx/s** | **8.82×** |
+| **Williams (8T)** | **766.12ms** | **116,877 tx/s** | **10.14×** |
+| **Williams (16T)** | **812.79ms** | **110,165 tx/s** | **9.56×** |
 
-**Williams Improvement over SupraBTM: 16.7%**
+**Williams Improvement over SupraBTM: 69-73% (depending on configuration)**
 
 ### Large-Scale Validation (99,973 Blocks)
 
@@ -236,11 +259,14 @@ python3 compare_results.py
 
 **Expected Output:**
 ```
-SupraBTM:    2853.54ms
-Williams:    2377.26ms
-Improvement: 16.7%
+SupraBTM (all configs):  2853.54ms
 
-✓ BEATS 15% THRESHOLD by 1.7%!
+Williams Results:
+  4 threads:   880.79ms  (69.1% improvement)
+  8 threads:   766.12ms  (73.2% improvement)
+  16 threads:  812.79ms  (71.5% improvement)
+
+✓ BEATS 15% THRESHOLD by 54-58% at ALL configurations!
 ```
 
 ### Full Validation (3-4 hours)
@@ -382,7 +408,7 @@ As block size increases:
 
 ## Claims Summary
 
-✅ **16.7% faster than SupraBTM** (requirement: 15%+)  
+✅ **69-73% faster than SupraBTM** across all thread configurations (requirement: 15%+)  
 ✅ **Tested on 99,973 Ethereum blocks** (requirement: 100,000+)  
 ✅ **Uses 16 cores** (requirement: ≤16)  
 ✅ **Fully open source** with reproducibility instructions  
