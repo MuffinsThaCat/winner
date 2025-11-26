@@ -1,17 +1,14 @@
-// Williams Hybrid Executor - Core execution logic with ordered commits
-// Implements the full architecture: prefetch → parallel execute → ordered commit → verify
+// Williams Hybrid Executor - Core execution logic
+// Implements: bulk prefetch → sequential execute → ordered commit
 
 use anyhow::{Result, Context, bail};
 use revm::{
     primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult},
-    db::{CacheDB, EmptyDB, Database, DatabaseRef},
+    db::{Database},
     Evm, DatabaseCommit,
 };
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
 
 /// Transaction execution result
@@ -33,14 +30,6 @@ pub struct BlockExecutionResult {
     pub tx_results: Vec<TxResult>,
     pub execution_time_us: u128,
     pub final_state_root: B256,
-}
-
-/// Transaction type classification
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TxType {
-    Simple,        // Simple transfers - fully parallel safe
-    Deterministic, // ERC20 transfers - mostly parallel safe
-    Complex,       // Complex contracts - need coordination
 }
 
 /// Williams Hybrid Executor
@@ -97,34 +86,22 @@ impl WilliamsExecutor {
         println!("BLOCK {} - {} transactions", block_number, tx_count);
         println!("{}", "=".repeat(70));
 
-        // PHASE 1: CLASSIFY transactions
-        let classified = self.classify_transactions(txs)?;
-        println!("Classification:");
-        println!("  Simple:        {} ({:.1}%)", classified.simple.len(), 
-            100.0 * classified.simple.len() as f64 / tx_count as f64);
-        println!("  Deterministic: {} ({:.1}%)", classified.deterministic.len(),
-            100.0 * classified.deterministic.len() as f64 / tx_count as f64);
-        println!("  Complex:       {} ({:.1}%)", classified.complex.len(),
-            100.0 * classified.complex.len() as f64 / tx_count as f64);
-
-        // PHASE 2: BULK PREFETCH all state
-        let all_addresses = self.collect_addresses(txs)?;
-        println!("\nPrefetching {} unique addresses...", all_addresses.len());
-        
+        // PHASE 1: BULK PREFETCH addresses
+        let addresses = self.collect_addresses(txs)?;
+        println!("Prefetching {} unique addresses...", addresses.len());
         let state_backend = if self.use_rpc {
             let rpc_url = self.rpc_url.as_ref().unwrap();
             let backend = RpcStateBackend::new(rpc_url.clone(), block_number);
-            backend.bulk_prefetch(&all_addresses)?;
+            backend.bulk_prefetch(&addresses)?;
             StateBackend::Rpc(backend)
         } else {
             let backend = OfflineStateBackend::new();
-            backend.bulk_prefetch(&all_addresses)?;
+            backend.bulk_prefetch(&addresses)?;
             StateBackend::Offline(backend)
         };
-
         println!("✓ Prefetch complete");
 
-        // PHASE 3: SEQUENTIAL EXECUTION (order preserved per category)
+        // PHASE 2: SEQUENTIAL EXECUTION (preserves transaction order)
         println!("\nExecuting transactions sequentially...");
         
         let block_env = self.parse_block_env(block)?;
@@ -134,16 +111,15 @@ impl WilliamsExecutor {
 
         let mut tx_results = Vec::new();
 
-        // Execute all transaction types sequentially
-        for (idx, tx) in classified.simple.iter().chain(classified.deterministic.iter()).chain(classified.complex.iter()) {
-            let tx_env = parse_tx_env(*tx)?;
-            let result = self.execute_single_tx(*idx, tx, &block_env, &mut db)?;
+        // Execute all transactions in order
+        for (idx, tx) in txs.iter().enumerate() {
+            let result = self.execute_single_tx(idx, tx, &block_env, &mut db)?;
             tx_results.push(result);
         }
 
         println!("✓ Sequential execution complete");
 
-        // PHASE 4: ORDERED COMMIT (deterministic final state)
+        // PHASE 3: ORDERED COMMIT (deterministic final state)
         println!("\nApplying state changes in order...");
         
         let success_count = tx_results.iter().filter(|r| r.success).count();
@@ -170,50 +146,6 @@ impl WilliamsExecutor {
             // Final state correctness is validated through gas usage and success rates
             final_state_root: B256::ZERO,
         })
-    }
-
-    /// Classify all transactions
-    fn classify_transactions<'a>(&self, txs: &'a [Value]) -> Result<ClassifiedTxs<'a>> {
-        let mut simple = Vec::new();
-        let mut deterministic = Vec::new();
-        let mut complex = Vec::new();
-
-        for (idx, tx) in txs.iter().enumerate() {
-            match self.classify_single_tx(tx) {
-                TxType::Simple => simple.push((idx, tx)),
-                TxType::Deterministic => deterministic.push((idx, tx)),
-                TxType::Complex => complex.push((idx, tx)),
-            }
-        }
-
-        Ok(ClassifiedTxs { simple, deterministic, complex })
-    }
-
-    /// Classify a single transaction
-    fn classify_single_tx(&self, tx: &Value) -> TxType {
-        // Check input data
-        if let Some(input) = tx.get("input").and_then(|i| i.as_str()) {
-            let input_data = input.trim_start_matches("0x");
-
-            // Empty input = simple transfer
-            if input_data.is_empty() || input_data == "0x" {
-                return TxType::Simple;
-            }
-
-            // Check for known deterministic patterns (ERC20)
-            if input_data.len() >= 8 {
-                let sig = &input_data[0..8];
-                match sig {
-                    "a9059cbb" => return TxType::Deterministic, // ERC20 transfer
-                    "095ea7b3" => return TxType::Deterministic, // approve
-                    "23b872dd" => return TxType::Deterministic, // transferFrom
-                    _ => {}
-                }
-            }
-        }
-
-        // Default: complex (safe)
-        TxType::Complex
     }
 
     /// Collect all unique addresses from transactions
@@ -349,13 +281,6 @@ impl WilliamsExecutor {
 
         Ok(block_env)
     }
-}
-
-/// Classified transactions
-struct ClassifiedTxs<'a> {
-    simple: Vec<(usize, &'a Value)>,
-    deterministic: Vec<(usize, &'a Value)>,
-    complex: Vec<(usize, &'a Value)>,
 }
 
 /// State backend wrapper
