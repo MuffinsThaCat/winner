@@ -205,8 +205,9 @@ pub struct OfflineStateBackend {
 
 impl OfflineStateBackend {
     pub fn new() -> Self {
-        // Default: 1000 ETH per account (very generous for testing)
-        let default_balance = U256::from(1000u64) * U256::from(10u128.pow(18));
+        // Default: 10 ETH per account (realistic for testing, enough for most transactions)
+        // Note: This matches typical testnet configurations
+        let default_balance = U256::from(10u64) * U256::from(10u128.pow(18));
         
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),

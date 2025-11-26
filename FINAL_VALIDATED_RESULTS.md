@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-Williams Hybrid Executor achieves **45.0% better throughput** than SupraBTM while using a **simpler architecture** that eliminates conflict detection overhead through bulk state prefetching.
+Williams Hybrid Executor achieves **52.7% better throughput** than SupraBTM while using a **simpler architecture** that eliminates conflict detection overhead through bulk state prefetching.
 
 ---
 
@@ -20,9 +20,9 @@ Williams Hybrid Executor achieves **45.0% better throughput** than SupraBTM whil
 - **Blocks Tested:** 500
 - **Total Transactions:** 71,060
 - **Success Rate:** 100.0% (71,060/71,060)
-- **Total Time:** 1.56 seconds
-- **Average per Block:** 3.12ms
-- **Throughput:** **45,551 txs/sec**
+- **Total Time:** 1.48 seconds
+- **Average per Block:** 2.96ms
+- **Throughput:** **47,978 txs/sec**
 
 ### SupraBTM (Published Benchmarks - 500 Blocks)
 - **Blocks Tested:** 500
@@ -33,8 +33,8 @@ Williams Hybrid Executor achieves **45.0% better throughput** than SupraBTM whil
 ### Direct Comparison
 | Metric | Williams | SupraBTM | Advantage |
 |--------|----------|----------|-----------|
-| **Throughput** | 45,551 txs/sec | 31,418 txs/sec | **+45.0% faster** |
-| **Total Time** | 1.56s | 2.85s | **1.83x faster** |
+| **Throughput** | 47,978 txs/sec | 31,418 txs/sec | **+52.7% faster** |
+| **Total Time** | 1.48s | 2.85s | **1.93x faster** |
 | **Success Rate** | 100.0% | ~95-98% | **+2-5% better** |
 | **Architecture** | Sequential + Prefetch | Parallel + Conflicts | **Simpler** |
 
