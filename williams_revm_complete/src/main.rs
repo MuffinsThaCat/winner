@@ -80,8 +80,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Take first 100 blocks for comprehensive testing (or all if less)
-    let test_blocks: Vec<_> = block_files.iter().take(100).cloned().collect();
+    // Take first 500 blocks for apples-to-apples comparison with SupraBTM (or all if less)
+    let test_blocks: Vec<_> = block_files.iter().take(500).cloned().collect();
     println!("Testing with {} blocks\n", test_blocks.len());
 
     // Create executor
