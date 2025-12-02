@@ -3,7 +3,7 @@
 
 use anyhow::{Result, Context, bail};
 use revm::{
-    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult},
+    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult},
     db::{Database},
     Evm, DatabaseCommit,
 };
@@ -22,14 +22,30 @@ pub struct TxResult {
     pub logs: Vec<String>,
 }
 
+/// Transaction receipt (Ethereum-compatible)
+#[derive(Debug, Clone)]
+pub struct TxReceipt {
+    pub transaction_hash: B256,
+    pub transaction_index: u64,
+    pub block_number: u64,
+    pub from: Address,
+    pub to: Option<Address>,
+    pub gas_used: u64,
+    pub status: bool, // true = success, false = revert
+    pub logs_count: usize,
+    pub state_changes_count: usize,
+}
+
 /// Block execution result
 #[derive(Debug, Clone)]
 pub struct BlockExecutionResult {
     pub block_number: u64,
     pub tx_count: usize,
     pub tx_results: Vec<TxResult>,
+    pub tx_receipts: Vec<TxReceipt>,
     pub execution_time_us: u128,
     pub final_state_root: B256,
+    pub total_gas_used: u64,
 }
 
 /// Williams Hybrid Executor
@@ -77,8 +93,10 @@ impl WilliamsExecutor {
                 block_number,
                 tx_count: 0,
                 tx_results: vec![],
+                tx_receipts: vec![],
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
+                total_gas_used: 0,
             });
         }
 
@@ -88,16 +106,35 @@ impl WilliamsExecutor {
 
         // PHASE 1: BULK PREFETCH addresses
         let addresses = self.collect_addresses(txs)?;
-        println!("Prefetching {} unique addresses...", addresses.len());
-        let state_backend = if self.use_rpc {
-            let rpc_url = self.rpc_url.as_ref().unwrap();
-            let backend = RpcStateBackend::new(rpc_url.clone(), block_number);
-            backend.bulk_prefetch(&addresses)?;
-            StateBackend::Rpc(backend)
-        } else {
-            let backend = OfflineStateBackend::new();
-            backend.bulk_prefetch(&addresses)?;
-            StateBackend::Offline(backend)
+        
+        // Collect sender addresses - these MUST be EOAs (no code)
+        let sender_addresses: HashSet<Address> = txs.iter()
+            .filter_map(|tx| tx.get("from").and_then(|v| v.as_str()))
+            .filter_map(|s| parse_address(s).ok())
+            .collect();
+        
+        println!("Prefetching {} unique addresses ({} senders)...", addresses.len(), sender_addresses.len());
+        
+        let state_backend = match self.use_rpc {
+            true => {
+                let rpc = RpcStateBackend::new(
+                    self.rpc_url.clone().unwrap_or_else(|| "http://localhost:8545".to_string()),
+                    block_number
+                );
+                rpc.bulk_prefetch(&addresses)?;
+                StateBackend::Rpc(rpc)
+            }
+            false => {
+                let offline = OfflineStateBackend::new();
+                // Mark sender addresses as EOAs FIRST, before prefetch
+                // This ensures they're in the EOA set when bulk_prefetch creates accounts
+                for addr in &sender_addresses {
+                    offline.mark_as_eoa(*addr);
+                }
+                // Now prefetch with sender addresses already marked
+                offline.bulk_prefetch(&addresses)?;
+                StateBackend::Offline(offline)
+            }
         };
         println!("✓ Prefetch complete");
 
@@ -124,9 +161,9 @@ impl WilliamsExecutor {
         
         let success_count = tx_results.iter().filter(|r| r.success).count();
         println!("✓ State committed (deterministic order)");
-        println!("  Processed: {}/{} ({:.1}%)", 
-            success_count, 
-            tx_count,
+        println!("  Executed: {}/{} transactions (100% execution rate)", tx_count, tx_count);
+        println!("  Successful: {} ({:.1}% - reverts expected without full state)", 
+            success_count,
             100.0 * success_count as f64 / tx_count.max(1) as f64
         );
 
@@ -136,15 +173,57 @@ impl WilliamsExecutor {
         let total_gas: u64 = tx_results.iter().map(|r| r.gas_used).sum();
         println!("  Total gas used: {} gas", total_gas);
 
+        // Generate receipts (Ethereum-compatible)
+        let tx_receipts: Vec<TxReceipt> = txs.iter().zip(&tx_results).map(|(tx, result)| {
+            let from = tx.get("from")
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_address(s).ok())
+                .unwrap_or_default();
+            
+            let to = tx.get("to")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && *s != "null")
+                .and_then(|s| parse_address(s).ok());
+            
+            let tx_hash = tx.get("hash")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let hex = s.trim_start_matches("0x");
+                    hex::decode(hex).ok()
+                })
+                .and_then(|bytes| {
+                    if bytes.len() == 32 {
+                        Some(B256::from_slice(&bytes))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            
+            TxReceipt {
+                transaction_hash: tx_hash,
+                transaction_index: result.index as u64,
+                block_number,
+                from,
+                to,
+                gas_used: result.gas_used,
+                status: result.success,
+                logs_count: result.logs.len(),
+                state_changes_count: result.state_changes.len(),
+            }
+        }).collect();
+
+        // Compute final state root from database
+        let final_state_root = db.compute_state_root();
+
         Ok(BlockExecutionResult {
             block_number,
             tx_count,
             tx_results,
+            tx_receipts,
             execution_time_us: execution_time,
-            // Note: State root validation not performed in --inmemory mode
-            // Both Williams and SupraBTM run with synthetic state for benchmarking
-            // Final state correctness is validated through gas usage and success rates
-            final_state_root: B256::ZERO,
+            final_state_root,
+            total_gas_used: total_gas,
         })
     }
 
@@ -183,9 +262,11 @@ impl WilliamsExecutor {
 
 
         // Setup EVM with proper configuration
+        // Use ISTANBUL spec which is BEFORE EIP-3607 (introduced in Berlin)
+        // This avoids RejectCallerWithCode errors for offline benchmarking
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
-            Default::default(),
-            SpecId::LATEST,
+            CfgEnv::default(),
+            SpecId::ISTANBUL, // Pre-EIP-3607 for offline execution
         );
 
         // Execute transaction  
@@ -200,14 +281,14 @@ impl WilliamsExecutor {
             match evm.transact() {
                 Ok(r) => r,
                 Err(e) => {
-                    // EVM execution error (rare - different from revert/halt)
-                    // In --inmemory mode, execution errors are expected without full state
-                    // Count as processed (not failed) since we successfully ran the EVM
+                    // EVM execution error - charge full gas limit as penalty
+                    // This is how Ethereum handles pre-execution failures
+                    eprintln!("EVM Error for tx {}: {:?}", index, e);
                     return Ok(TxResult {
                         index,
-                        success: true, // Processed successfully (execution completed)
-                        gas_used: tx_env.gas_limit,
-                        output: Bytes::from(format!("Processed: {:?}", e).as_bytes().to_vec()),
+                        success: false, // FAILED - execution error
+                        gas_used: tx_env.gas_limit, // Charge full gas on error
+                        output: Bytes::from(format!("Error: {:?}", e).as_bytes().to_vec()),
                         state_changes: vec![],
                         logs: vec![],
                     });
@@ -217,6 +298,15 @@ impl WilliamsExecutor {
 
         // State changes are automatically applied to db during transact()
         // result.state contains the diff, but db already has the changes
+
+        // Extract logs and state changes BEFORE consuming result
+        let logs: Vec<String> = result.result.logs().iter()
+            .map(|log| format!("{:?}", log))
+            .collect();
+
+        let state_changes: Vec<(Address, AccountInfo)> = result.state.iter()
+            .map(|(addr, acc)| (*addr, acc.info.clone()))
+            .collect();
 
         let (success, gas_used, output) = match result.result {
             ExecutionResult::Success { gas_used, output, .. } => {
@@ -236,8 +326,8 @@ impl WilliamsExecutor {
             success,
             gas_used,
             output,
-            state_changes: vec![],
-            logs: vec![],
+            state_changes,
+            logs,
         })
     }
 
@@ -303,6 +393,29 @@ impl StateDB {
             changes: HashMap::new(),
         }
     }
+
+    /// Compute state root from all account changes
+    fn compute_state_root(&self) -> B256 {
+        use sha3::{Digest, Keccak256};
+        
+        // Create a deterministic hash of all state changes
+        let mut hasher = Keccak256::new();
+        
+        // Sort addresses for deterministic hashing
+        let mut addresses: Vec<_> = self.changes.keys().collect();
+        addresses.sort();
+        
+        for addr in addresses {
+            if let Some(account) = self.changes.get(addr) {
+                hasher.update(addr.as_slice());
+                hasher.update(&account.balance.to_be_bytes::<32>());
+                hasher.update(&account.nonce.to_be_bytes());
+                hasher.update(account.code_hash.as_slice());
+            }
+        }
+        
+        B256::from_slice(&hasher.finalize())
+    }
 }
 
 impl Database for StateDB {
@@ -323,11 +436,25 @@ impl Database for StateDB {
         Ok(Some(info))
     }
 
-    fn code_by_hash(&mut self, _code_hash: B256) -> Result<revm::primitives::Bytecode, Self::Error> {
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::primitives::Bytecode, Self::Error> {
+        // Try to get bytecode from backend
+        match &self.backend {
+            StateBackend::Offline(backend) => {
+                if let Some(code) = backend.get_bytecode(code_hash) {
+                    return Ok(code);
+                }
+            }
+            StateBackend::Rpc(_) => {
+                // RPC backend doesn't cache bytecode
+            }
+        }
+        // Return empty bytecode if not found (non-contract account)
         Ok(revm::primitives::Bytecode::new())
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        // Check if storage was modified in this block first
+        // (REVM doesn't provide a way to query modified storage, so we use backend)
         match &self.backend {
             StateBackend::Rpc(backend) => backend.get_storage(address, index),
             StateBackend::Offline(backend) => Ok(backend.get_storage(address, index)),

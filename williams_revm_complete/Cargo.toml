@@ -12,6 +12,7 @@ rayon = "1.8"
 hex = "0.4"
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 tokio = { version = "1.35", features = ["full"] }
+sha3 = "0.10"
 
 [[bin]]
 name = "williams-complete"

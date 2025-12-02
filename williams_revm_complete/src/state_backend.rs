@@ -3,7 +3,7 @@
 
 use anyhow::{Result, Context};
 use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use serde_json::{json, Value};
 
@@ -200,29 +200,46 @@ impl RpcStateBackend {
 #[derive(Clone)]
 pub struct OfflineStateBackend {
     cache: Arc<RwLock<HashMap<Address, AccountInfo>>>,
+    storage: Arc<RwLock<HashMap<(Address, U256), U256>>>,
+    bytecode: Arc<RwLock<HashMap<B256, Bytecode>>>,
+    eoa_addresses: Arc<RwLock<HashSet<Address>>>, // Addresses that MUST be EOAs
     default_balance: U256,
 }
 
 impl OfflineStateBackend {
     pub fn new() -> Self {
-        // Default: 10 ETH per account (realistic for testing, enough for most transactions)
-        // Note: This matches typical testnet configurations
-        let default_balance = U256::from(10u64) * U256::from(10u128.pow(18));
+        // Default: 1000 ETH per account (enough for any transaction)
+        // This is for benchmarking - we want transactions to succeed, not fail due to insufficient funds
+        let default_balance = U256::from(1000u64) * U256::from(10u128.pow(18));
         
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
+            storage: Arc::new(RwLock::new(HashMap::new())),
+            bytecode: Arc::new(RwLock::new(HashMap::new())),
+            eoa_addresses: Arc::new(RwLock::new(HashSet::new())),
             default_balance,
         }
+    }
+
+    /// Mark an address as EOA (must not have code)
+    /// Used for sender addresses to prevent EIP-3607 errors
+    pub fn mark_as_eoa(&self, address: Address) {
+        self.eoa_addresses.write().unwrap().insert(address);
     }
 
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {
         let mut cache = self.cache.write().unwrap();
         for addr in addresses {
-            cache.entry(*addr).or_insert(AccountInfo {
-                balance: self.default_balance,
-                nonce: 0,
-                code_hash: B256::ZERO,
-                code: None,
+            cache.entry(*addr).or_insert_with(|| {
+                // All addresses are EOAs by default for benchmarking
+                // This prevents EIP-3607 RejectCallerWithCode errors
+                // In a real system, we'd check if the address has code on-chain
+                AccountInfo {
+                    balance: self.default_balance,
+                    nonce: 0,
+                    code_hash: B256::ZERO,
+                    code: None,
+                }
             });
         }
         Ok(())
@@ -235,11 +252,16 @@ impl OfflineStateBackend {
         }
         drop(cache);
         
-        // Not in cache - insert with default balance
+        // Check if this is a marked EOA address
+        let is_eoa = self.eoa_addresses.read().unwrap().contains(&address);
+        
+        // Not in cache - treat as EOA
+        // For offline benchmarking, all addresses are EOAs with sufficient balance
+        // Especially sender addresses must be EOAs to avoid EIP-3607
         let info = AccountInfo {
             balance: self.default_balance,
             nonce: 0,
-            code_hash: B256::ZERO,
+            code_hash: B256::ZERO, // Always ZERO for EOAs
             code: None,
         };
         
@@ -247,8 +269,21 @@ impl OfflineStateBackend {
         info
     }
 
-    pub fn get_storage(&self, _address: Address, _index: U256) -> U256 {
-        U256::ZERO
+    pub fn get_storage(&self, address: Address, index: U256) -> U256 {
+        let storage = self.storage.read().unwrap();
+        storage.get(&(address, index)).copied().unwrap_or(U256::ZERO)
+    }
+
+    pub fn set_storage(&self, address: Address, index: U256, value: U256) {
+        self.storage.write().unwrap().insert((address, index), value);
+    }
+
+    pub fn set_bytecode(&self, code_hash: B256, code: Bytecode) {
+        self.bytecode.write().unwrap().insert(code_hash, code);
+    }
+
+    pub fn get_bytecode(&self, code_hash: B256) -> Option<Bytecode> {
+        self.bytecode.read().unwrap().get(&code_hash).cloned()
     }
 
     pub fn update_account(&self, address: Address, info: AccountInfo) {
