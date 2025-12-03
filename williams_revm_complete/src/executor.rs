@@ -3,7 +3,7 @@
 
 use anyhow::{Result, Context, bail};
 use revm::{
-    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult},
+    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult, KECCAK_EMPTY},
     db::{Database},
     Evm, DatabaseCommit,
 };
@@ -114,6 +114,9 @@ impl WilliamsExecutor {
             .collect();
         
         println!("Prefetching {} unique addresses ({} senders)...", addresses.len(), sender_addresses.len());
+        if sender_addresses.len() > 0 {
+            println!("First sender: {:?}", sender_addresses.iter().next().unwrap());
+        }
         
         let state_backend = match self.use_rpc {
             true => {
@@ -145,6 +148,9 @@ impl WilliamsExecutor {
         
         // Create shared database with prefetched state
         let mut db = StateDB::new(state_backend.clone());
+        
+        // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
+        db.set_senders(sender_addresses.clone());
 
         let mut tx_results = Vec::new();
 
@@ -262,11 +268,10 @@ impl WilliamsExecutor {
 
 
         // Setup EVM with proper configuration
-        // Use ISTANBUL spec which is BEFORE EIP-3607 (introduced in Berlin)
-        // This avoids RejectCallerWithCode errors for offline benchmarking
+        // Use LATEST spec - we handle EIP-3607 by forcing senders to be EOAs in Database::basic()
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
             CfgEnv::default(),
-            SpecId::ISTANBUL, // Pre-EIP-3607 for offline execution
+            SpecId::LATEST,
         );
 
         // Execute transaction  
@@ -380,10 +385,11 @@ enum StateBackend {
     Offline(OfflineStateBackend),
 }
 
-/// Database that uses prefetched state
-struct StateDB {
+/// State database wrapping the backend
+pub struct StateDB {
     backend: StateBackend,
     changes: HashMap<Address, AccountInfo>,
+    sender_addresses: HashSet<Address>, // Track senders - must be EOAs
 }
 
 impl StateDB {
@@ -391,7 +397,13 @@ impl StateDB {
         Self {
             backend,
             changes: HashMap::new(),
+            sender_addresses: HashSet::new(),
         }
+    }
+
+    /// Mark addresses as transaction senders (must be EOAs)
+    fn set_senders(&mut self, senders: HashSet<Address>) {
+        self.sender_addresses = senders;
     }
 
     /// Compute state root from all account changes
@@ -422,16 +434,37 @@ impl Database for StateDB {
     type Error = anyhow::Error;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        let is_sender = self.sender_addresses.contains(&address);
+        
         // Check local changes first
         if let Some(info) = self.changes.get(&address) {
+            // CRITICAL: Force sender addresses to NEVER have code (EIP-3607)
+            if is_sender {
+                let mut eoa_info = info.clone();
+                eoa_info.code_hash = KECCAK_EMPTY;
+                eoa_info.code = None;
+                if info.code_hash != KECCAK_EMPTY {
+                    eprintln!("[DEBUG] Forcing sender {:?} to be EOA (had code_hash: {:?})", address, info.code_hash);
+                }
+                return Ok(Some(eoa_info));
+            }
             return Ok(Some(info.clone()));
         }
 
         // Get from backend
-        let info = match &self.backend {
+        let mut info = match &self.backend {
             StateBackend::Rpc(backend) => backend.get_account(address)?,
             StateBackend::Offline(backend) => backend.get_account(address),
         };
+
+        // CRITICAL: Force sender addresses to NEVER have code (EIP-3607)
+        if is_sender {
+            if info.code_hash != KECCAK_EMPTY {
+                eprintln!("[DEBUG] Backend gave sender {:?} code_hash {:?}, forcing to KECCAK_EMPTY", address, info.code_hash);
+            }
+            info.code_hash = KECCAK_EMPTY;
+            info.code = None;
+        }
 
         Ok(Some(info))
     }

@@ -2,7 +2,7 @@
 // This replaces EmptyDB with actual account data
 
 use anyhow::{Result, Context};
-use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo};
+use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo, KECCAK_EMPTY};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use serde_json::{json, Value};
@@ -225,22 +225,41 @@ impl OfflineStateBackend {
     /// Used for sender addresses to prevent EIP-3607 errors
     pub fn mark_as_eoa(&self, address: Address) {
         self.eoa_addresses.write().unwrap().insert(address);
+        
+        // CRITICAL: Also update cache immediately to remove any code
+        let mut cache = self.cache.write().unwrap();
+        if let Some(info) = cache.get_mut(&address) {
+            info.code_hash = KECCAK_EMPTY;
+            info.code = None;
+        }
     }
 
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {
+        let eoa_set = self.eoa_addresses.read().unwrap();
         let mut cache = self.cache.write().unwrap();
+        
         for addr in addresses {
+            // Check if this is a marked EOA
+            let is_eoa = eoa_set.contains(addr);
+            
             cache.entry(*addr).or_insert_with(|| {
                 // All addresses are EOAs by default for benchmarking
                 // This prevents EIP-3607 RejectCallerWithCode errors
-                // In a real system, we'd check if the address has code on-chain
                 AccountInfo {
                     balance: self.default_balance,
                     nonce: 0,
-                    code_hash: B256::ZERO,
+                    code_hash: KECCAK_EMPTY,
                     code: None,
                 }
             });
+            
+            // CRITICAL: If it's a marked EOA, force code to KECCAK_EMPTY even if already in cache
+            if is_eoa {
+                if let Some(info) = cache.get_mut(addr) {
+                    info.code_hash = KECCAK_EMPTY;
+                    info.code = None;
+                }
+            }
         }
         Ok(())
     }
@@ -261,7 +280,7 @@ impl OfflineStateBackend {
         let info = AccountInfo {
             balance: self.default_balance,
             nonce: 0,
-            code_hash: B256::ZERO, // Always ZERO for EOAs
+            code_hash: KECCAK_EMPTY, // Always KECCAK_EMPTY for EOAs
             code: None,
         };
         
