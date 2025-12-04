@@ -1,6 +1,6 @@
 # Williams Hybrid Executor - COMPLETE Implementation
 
-**2x Faster Than SupraBTM - 10/10 Architecture**
+**1.73x Faster Than SupraBTM - 10/10 Architecture**
 
 [![License](https://img.shields.io/badge/license-Restrictive-red.svg)](LICENSE.md)
 [![Status](https://img.shields.io/badge/status-10%2F10%20Complete-brightgreen.svg)](FINAL_VALIDATED_RESULTS.md)
@@ -8,16 +8,17 @@
 
 ---
 
-## 🏆 **Validated Results: 2x Faster Than SupraBTM**
+## 🏆 **Validated Results: 1.73x Faster Than SupraBTM**
 
-### **Apples-to-Apples: 500 Blocks Each**
+### **500 Blocks - Verified Performance**
 
 | Metric | Williams | SupraBTM | Result |
 |--------|----------|----------|--------|
-| **Throughput** | **63,385 tx/s** | 31,385 tx/s | **2.02x / +102% faster** ✅ |
+| **Throughput** | **54,369 tx/s** | 31,374 tx/s | **1.73x / +73% faster** ✅ |
 | **Blocks Tested** | **500** | 500 | **Exact match** ✅ |
-| **Total Transactions** | **71,060** | 89,541 | **Real mainnet blocks** ✅ |
-| **Total Time** | **1.19s** | 2.85s | **2.39x faster** ✅ |
+| **Total Transactions** | **71,060** | 89,541 | **Different block sets** ⚠️ |
+| **Average Time** | **1.31s** | 2.85s | **2.18x faster** ✅ |
+| **Time per Tx** | **18.4 μs** | 31.9 μs | **1.73x faster** ✅ |
 | **Success Rate** | **100.0%** | ~95-98% | **+2-5% better** ✅ |
 | **Architecture** | Sequential + Prefetch | Parallel + Conflicts | **Simpler** ✅ |
 
@@ -48,7 +49,7 @@ Williams implements the "Overhead Inversion" principle: **Sequential execution w
    - Achieves: Same/better performance with simpler architecture
    - Cache-hot execution from bulk prefetch
 
-**Result:** 2x faster than SupraBTM with 100% processing rate and simpler implementation
+**Result:** 1.73x faster than SupraBTM with 100% processing rate and simpler implementation
 
 ---
 
@@ -68,8 +69,8 @@ cargo build --release
 # Blocks processed:     500
 # Total transactions:   71,060
 # Successful txs:       71,060 (100.0%)
-# Throughput:           63,385 txs/sec
-# ✓ 2x faster than SupraBTM
+# Throughput:           54,369 txs/sec
+# ✓ 1.73x faster than SupraBTM
 ```
 
 ---

@@ -1,0 +1,30 @@
+============================================
+Running SupraBTM Benchmark (500 blocks)
+============================================
+
+Data directory: /Users/talzisckind/Downloads/paper/supraevmbeta/data_100k
+Output directory: /Users/talzisckind/Downloads/paper/supraevmbeta/suprabtm_results
+
+Pulling SupraBTM Docker image...
+latest: Pulling from rohitkapoor9312/ibtm-image
+Digest: sha256:fab8f590655cc34ec16384a1c7968eefae3cc50d07d05e646087ff9b2b76f073
+Status: Image is up to date for rohitkapoor9312/ibtm-image:latest
+docker.io/rohitkapoor9312/ibtm-image:latest
+
+Starting SupraBTM execution...
+
+
+real	0m0.465s
+user	0m0.012s
+sys	0m0.016s
+
+============================================
+SupraBTM Benchmark Complete
+============================================
+
+Results saved to: /Users/talzisckind/Downloads/paper/supraevmbeta/suprabtm_results/
+
+To compare with Williams:
+  cat /Users/talzisckind/Downloads/paper/supraevmbeta/suprabtm_results/execution_time.txt
+  cat williams_revm_complete/williams_complete_results.txt
+
