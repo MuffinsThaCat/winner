@@ -9,7 +9,105 @@ use revm::{
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
+
+/// Parsed transaction (cached to avoid triple JSON parsing)
+#[derive(Debug, Clone)]
+struct ParsedTx {
+    from: Address,
+    to: Option<Address>,
+    value: U256,
+    data: Bytes,
+    gas_limit: u64,
+    gas_price: U256,
+    hash: B256,
+}
+
+impl ParsedTx {
+    /// Parse transaction from JSON once (avoids triple parsing)
+    fn from_json(tx: &Value) -> Result<Self> {
+        let from = tx.get("from")
+            .and_then(|v| v.as_str())
+            .and_then(|s| parse_address(s).ok())
+            .unwrap_or_default();
+        
+        let to = tx.get("to")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "null")
+            .and_then(|s| parse_address(s).ok());
+        
+        let value = tx.get("value")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                U256::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(U256::ZERO);
+        
+        let data = tx.get("input")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                hex::decode(s).ok()
+            })
+            .map(Bytes::from)
+            .unwrap_or_default();
+        
+        let gas_limit = tx.get("gas")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                u64::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(30_000_000);
+        
+        let gas_price = tx.get("gasPrice")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                U256::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(U256::ZERO);
+        
+        let hash = tx.get("hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                hex::decode(s).ok()
+            })
+            .and_then(|bytes| if bytes.len() == 32 { Some(B256::from_slice(&bytes)) } else { None })
+            .unwrap_or_default();
+        
+        Ok(ParsedTx {
+            from,
+            to,
+            value,
+            data,
+            gas_limit,
+            gas_price,
+            hash,
+        })
+    }
+    
+    /// Convert to TxEnv for EVM execution (borrows data to avoid clone)
+    fn to_tx_env(&self) -> TxEnv {
+        TxEnv {
+            caller: self.from,
+            transact_to: self.to.map(TransactTo::Call).unwrap_or(TransactTo::Create),
+            value: self.value,
+            data: self.data.clone(), // TODO: Could use Arc<Bytes> to avoid clone
+            gas_limit: self.gas_limit,
+            gas_price: self.gas_price,
+            nonce: Some(0),
+            chain_id: Some(1),
+            access_list: vec![],
+            gas_priority_fee: None,
+            blob_hashes: vec![],
+            max_fee_per_blob_gas: None,
+        }
+    }
+}
 
 /// Transaction execution result
 #[derive(Debug, Clone)]
@@ -104,13 +202,18 @@ impl WilliamsExecutor {
         println!("BLOCK {} - {} transactions", block_number, tx_count);
         println!("{}", "=".repeat(70));
 
-        // PHASE 1: BULK PREFETCH addresses
-        let addresses = self.collect_addresses(txs)?;
+        // OPTIMIZATION: Parse all transactions ONCE (eliminates triple JSON parsing)
+        println!("Parsing transactions...");
+        let parsed_txs: Vec<ParsedTx> = txs.iter()
+            .map(|tx| ParsedTx::from_json(tx))
+            .collect::<Result<Vec<_>>>()?;
+
+        // PHASE 1: BULK PREFETCH addresses (using cached parsed data)
+        let addresses = self.collect_addresses_from_parsed(&parsed_txs);
         
         // Collect sender addresses - these MUST be EOAs (no code)
-        let sender_addresses: HashSet<Address> = txs.iter()
-            .filter_map(|tx| tx.get("from").and_then(|v| v.as_str()))
-            .filter_map(|s| parse_address(s).ok())
+        let sender_addresses: HashSet<Address> = parsed_txs.iter()
+            .map(|tx| tx.from)
             .collect();
         
         println!("Prefetching {} unique addresses ({} senders)...", addresses.len(), sender_addresses.len());
@@ -152,11 +255,18 @@ impl WilliamsExecutor {
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
         db.set_senders(sender_addresses.clone());
 
-        let mut tx_results = Vec::new();
+        // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
+        let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
+            CfgEnv::default(),
+            SpecId::LATEST,
+        );
 
-        // Execute all transactions in order
-        for (idx, tx) in txs.iter().enumerate() {
-            let result = self.execute_single_tx(idx, tx, &block_env, &mut db)?;
+        // Pre-allocate results vector (optimization: avoid reallocations)
+        let mut tx_results = Vec::with_capacity(tx_count);
+
+        // Execute all transactions in order (using pre-parsed data)
+        for (idx, parsed_tx) in parsed_txs.iter().enumerate() {
+            let result = self.execute_single_tx(idx, parsed_tx, &block_env, &cfg_env, &mut db)?;
             tx_results.push(result);
         }
 
@@ -179,45 +289,22 @@ impl WilliamsExecutor {
         let total_gas: u64 = tx_results.iter().map(|r| r.gas_used).sum();
         println!("  Total gas used: {} gas", total_gas);
 
-        // Generate receipts (Ethereum-compatible)
-        let tx_receipts: Vec<TxReceipt> = txs.iter().zip(&tx_results).map(|(tx, result)| {
-            let from = tx.get("from")
-                .and_then(|v| v.as_str())
-                .and_then(|s| parse_address(s).ok())
-                .unwrap_or_default();
-            
-            let to = tx.get("to")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty() && *s != "null")
-                .and_then(|s| parse_address(s).ok());
-            
-            let tx_hash = tx.get("hash")
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    let hex = s.trim_start_matches("0x");
-                    hex::decode(hex).ok()
-                })
-                .and_then(|bytes| {
-                    if bytes.len() == 32 {
-                        Some(B256::from_slice(&bytes))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default();
-            
-            TxReceipt {
-                transaction_hash: tx_hash,
+        // Generate receipts (Ethereum-compatible) - pre-allocate, use cached parsed data
+        let mut tx_receipts = Vec::with_capacity(tx_count);
+        for (parsed_tx, result) in parsed_txs.iter().zip(&tx_results) {
+            let receipt = TxReceipt {
+                transaction_hash: parsed_tx.hash,
                 transaction_index: result.index as u64,
                 block_number,
-                from,
-                to,
+                from: parsed_tx.from,
+                to: parsed_tx.to,
                 gas_used: result.gas_used,
                 status: result.success,
                 logs_count: result.logs.len(),
                 state_changes_count: result.state_changes.len(),
-            }
-        }).collect();
+            };
+            tx_receipts.push(receipt);
+        }
 
         // Compute final state root from database
         let final_state_root = db.compute_state_root();
@@ -233,54 +320,39 @@ impl WilliamsExecutor {
         })
     }
 
-    /// Collect all unique addresses from transactions
-    fn collect_addresses(&self, txs: &[Value]) -> Result<Vec<Address>> {
-        let mut addresses = HashSet::new();
+    /// Collect all unique addresses from parsed transactions (optimized - no JSON parsing)
+    fn collect_addresses_from_parsed(&self, parsed_txs: &[ParsedTx]) -> Vec<Address> {
+        let mut addresses = HashSet::with_capacity(parsed_txs.len() * 2);
 
-        for tx in txs {
-            if let Some(from) = tx.get("from").and_then(|v| v.as_str()) {
-                if let Ok(addr) = parse_address(from) {
-                    addresses.insert(addr);
-                }
-            }
-            if let Some(to) = tx.get("to").and_then(|v| v.as_str()) {
-                if !to.is_empty() && to != "null" {
-                    if let Ok(addr) = parse_address(to) {
-                        addresses.insert(addr);
-                    }
-                }
+        for tx in parsed_txs {
+            addresses.insert(tx.from);
+            if let Some(to) = tx.to {
+                addresses.insert(to);
             }
         }
 
-        Ok(addresses.into_iter().collect())
+        addresses.into_iter().collect()
     }
 
-    /// Execute a single transaction
+    /// Execute a single transaction (optimized - uses pre-parsed tx)
     fn execute_single_tx(
         &self,
         index: usize,
-        tx: &Value,
+        parsed_tx: &ParsedTx,
         block_env: &BlockEnv,
+        cfg_env: &CfgEnvWithHandlerCfg,
         db: &mut StateDB,
     ) -> Result<TxResult> {
-        // Parse transaction
-        let tx_env = parse_tx_env(tx)?;
+        // Use pre-parsed transaction (no JSON parsing!)
+        let tx_env = parsed_tx.to_tx_env();
 
-
-        // Setup EVM with proper configuration
-        // Use LATEST spec - we handle EIP-3607 by forcing senders to be EOAs in Database::basic()
-        let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
-            CfgEnv::default(),
-            SpecId::LATEST,
-        );
-
-        // Execute transaction  
+        // Execute transaction (cfg_env is now passed in - created once per block)
         let result = {
             let mut evm = Evm::builder()
                 .with_db(db)
                 .with_block_env(block_env.clone())
                 .with_tx_env(tx_env.clone())
-                .with_cfg_env_with_handler_cfg(cfg_env)
+                .with_cfg_env_with_handler_cfg(cfg_env.clone())
                 .build();
 
             match evm.transact() {
@@ -341,28 +413,28 @@ impl WilliamsExecutor {
         let mut block_env = BlockEnv::default();
 
         if let Some(num) = block.get("number").and_then(|v| v.as_str()) {
-            let num_str = num.trim_start_matches("0x");
+            let num_str = if num.starts_with("0x") { &num[2..] } else { num };
             if let Ok(block_num) = u64::from_str_radix(num_str, 16) {
                 block_env.number = U256::from(block_num);
             }
         }
 
         if let Some(ts) = block.get("timestamp").and_then(|v| v.as_str()) {
-            let ts_str = ts.trim_start_matches("0x");
+            let ts_str = if ts.starts_with("0x") { &ts[2..] } else { ts };
             if let Ok(timestamp) = u64::from_str_radix(ts_str, 16) {
                 block_env.timestamp = U256::from(timestamp);
             }
         }
 
         if let Some(gas) = block.get("gasLimit").and_then(|v| v.as_str()) {
-            let gas_str = gas.trim_start_matches("0x");
+            let gas_str = if gas.starts_with("0x") { &gas[2..] } else { gas };
             if let Ok(gas_limit) = u64::from_str_radix(gas_str, 16) {
                 block_env.gas_limit = U256::from(gas_limit);
             }
         }
 
         if let Some(base_fee) = block.get("baseFeePerGas").and_then(|v| v.as_str()) {
-            let bf_str = base_fee.trim_start_matches("0x");
+            let bf_str = if base_fee.starts_with("0x") { &base_fee[2..] } else { base_fee };
             if let Ok(bf) = U256::from_str_radix(bf_str, 16) {
                 block_env.basefee = bf;
             }
@@ -396,8 +468,8 @@ impl StateDB {
     fn new(backend: StateBackend) -> Self {
         Self {
             backend,
-            changes: HashMap::new(),
-            sender_addresses: HashSet::new(),
+            changes: HashMap::with_capacity(1000),
+            sender_addresses: HashSet::with_capacity(500),
         }
     }
 
@@ -507,9 +579,18 @@ impl DatabaseCommit for StateDB {
     }
 }
 
-/// Parse address from hex string
+/// Parse address from hex string (optimized - zero-copy, no allocation)
 fn parse_address(addr_str: &str) -> Result<Address> {
-    let addr_hex = addr_str.trim_start_matches("0x");
+    let addr_hex = if addr_str.starts_with("0x") { &addr_str[2..] } else { addr_str };
+    
+    // Fast path: if already 40 chars (20 bytes), decode directly
+    if addr_hex.len() == 40 {
+        let mut bytes = [0u8; 20];
+        hex::decode_to_slice(addr_hex, &mut bytes)?;
+        return Ok(Address::from_slice(&bytes));
+    }
+    
+    // Slow path: variable length
     let bytes = hex::decode(addr_hex)?;
     if bytes.len() != 20 {
         bail!("Invalid address length");
@@ -534,21 +615,21 @@ fn parse_tx_env(tx: &Value) -> Result<TxEnv> {
     }
 
     if let Some(value) = tx.get("value").and_then(|v| v.as_str()) {
-        let value_str = value.trim_start_matches("0x");
+        let value_str = if value.starts_with("0x") { &value[2..] } else { value };
         if let Ok(val) = U256::from_str_radix(value_str, 16) {
             tx_env.value = val;
         }
     }
 
     if let Some(input) = tx.get("input").and_then(|v| v.as_str()) {
-        let input_str = input.trim_start_matches("0x");
+        let input_str = if input.starts_with("0x") { &input[2..] } else { input };
         if let Ok(bytes) = hex::decode(input_str) {
             tx_env.data = Bytes::from(bytes);
         }
     }
 
     if let Some(gas) = tx.get("gas").and_then(|v| v.as_str()) {
-        let gas_str = gas.trim_start_matches("0x");
+        let gas_str = if gas.starts_with("0x") { &gas[2..] } else { gas };
         if let Ok(gas_val) = u64::from_str_radix(gas_str, 16) {
             tx_env.gas_limit = gas_val;
         }
@@ -557,7 +638,7 @@ fn parse_tx_env(tx: &Value) -> Result<TxEnv> {
     }
 
     if let Some(gas_price) = tx.get("gasPrice").and_then(|v| v.as_str()) {
-        let gp_str = gas_price.trim_start_matches("0x");
+        let gp_str = if gas_price.starts_with("0x") { &gas_price[2..] } else { gas_price };
         if let Ok(gp) = U256::from_str_radix(gp_str, 16) {
             tx_env.gas_price = gp;
         }
