@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use executor::{WilliamsExecutor, BlockExecutionResult};
 use serde_json::Value;
+use rayon::prelude::*;
 
 fn main() -> Result<()> {
     println!("{}", "=".repeat(70));
@@ -84,6 +85,23 @@ fn main() -> Result<()> {
     let test_blocks: Vec<_> = block_files.iter().take(500).cloned().collect();
     println!("Testing with {} blocks\n", test_blocks.len());
 
+    // OPTIMIZATION: Pre-load ALL block files in parallel into memory
+    println!("⚡ Pre-loading all block files into memory (parallel)...");
+    let preload_start = Instant::now();
+    
+    let loaded_blocks: Vec<(PathBuf, String, u64)> = test_blocks
+        .par_iter()
+        .filter_map(|block_path| {
+            let block_data = fs::read_to_string(block_path).ok()?;
+            let block_number = extract_block_number(block_path).ok()?;
+            Some((block_path.clone(), block_data, block_number))
+        })
+        .collect();
+    
+    println!("✓ Pre-loaded {} blocks in {:.2}ms", loaded_blocks.len(), preload_start.elapsed().as_secs_f64() * 1000.0);
+    println!("  Avg load time: {:.3}ms per block", preload_start.elapsed().as_secs_f64() * 1000.0 / loaded_blocks.len() as f64);
+    println!();
+
     // Create executor
     let executor = if let Some(url) = rpc_url {
         WilliamsExecutor::with_rpc(thread_count, url)
@@ -97,18 +115,14 @@ fn main() -> Result<()> {
     let mut total_txs = 0;
     let mut successful_txs = 0;
 
-    for (idx, block_path) in test_blocks.iter().enumerate() {
-        println!("\n[{}/{}] Processing: {:?}", idx + 1, test_blocks.len(), block_path.file_name());
+    for (idx, (block_path, block_data, block_number)) in loaded_blocks.iter().enumerate() {
+        println!("\n[{}/{}] Processing: {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
         
-        // Load block
-        let block_data = fs::read_to_string(block_path)?;
-        let json: Value = serde_json::from_str(&block_data)?;
-        
-        // Extract block number
-        let block_number = extract_block_number(block_path)?;
+        // Parse with standard serde_json (conversion overhead from simd-json was too expensive)
+        let json: Value = serde_json::from_str(block_data)?;
         
         // Execute block
-        match executor.execute_block(&json, block_number) {
+        match executor.execute_block(&json, *block_number) {
             Ok(result) => {
                 total_txs += result.tx_count;
                 successful_txs += result.tx_results.iter().filter(|r| r.success).count();

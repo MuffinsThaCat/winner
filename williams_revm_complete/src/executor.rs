@@ -176,9 +176,10 @@ impl WilliamsExecutor {
         block_data: &Value,
         block_number: u64,
     ) -> Result<BlockExecutionResult> {
-        let start = std::time::Instant::now();
+        let total_start = std::time::Instant::now();
 
         // Parse block and transactions
+        let parse_start = std::time::Instant::now();
         let block = block_data.get("result").unwrap_or(block_data);
         let txs = block
             .get("transactions")
@@ -186,6 +187,7 @@ impl WilliamsExecutor {
             .context("No transactions in block")?;
 
         let tx_count = txs.len();
+        let parse_time = parse_start.elapsed();
         if tx_count == 0 {
             return Ok(BlockExecutionResult {
                 block_number,
@@ -203,24 +205,24 @@ impl WilliamsExecutor {
         println!("{}", "=".repeat(70));
 
         // OPTIMIZATION: Parse all transactions ONCE (eliminates triple JSON parsing)
-        println!("Parsing transactions...");
+        let tx_parse_start = std::time::Instant::now();
         let parsed_txs: Vec<ParsedTx> = txs.iter()
             .map(|tx| ParsedTx::from_json(tx))
             .collect::<Result<Vec<_>>>()?;
+        let tx_parse_time = tx_parse_start.elapsed();
 
         // PHASE 1: BULK PREFETCH addresses (using cached parsed data)
+        let addr_collect_start = std::time::Instant::now();
         let addresses = self.collect_addresses_from_parsed(&parsed_txs);
+        let addr_collect_time = addr_collect_start.elapsed();
         
         // Collect sender addresses - these MUST be EOAs (no code)
         let sender_addresses: HashSet<Address> = parsed_txs.iter()
             .map(|tx| tx.from)
             .collect();
         
-        println!("Prefetching {} unique addresses ({} senders)...", addresses.len(), sender_addresses.len());
-        if sender_addresses.len() > 0 {
-            println!("First sender: {:?}", sender_addresses.iter().next().unwrap());
-        }
         
+        let prefetch_start = std::time::Instant::now();
         let state_backend = match self.use_rpc {
             true => {
                 let rpc = RpcStateBackend::new(
@@ -242,11 +244,10 @@ impl WilliamsExecutor {
                 StateBackend::Offline(offline)
             }
         };
-        println!("✓ Prefetch complete");
+        let prefetch_time = prefetch_start.elapsed();
 
         // PHASE 2: SEQUENTIAL EXECUTION (preserves transaction order)
-        println!("\nExecuting transactions sequentially...");
-        
+        let setup_start = std::time::Instant::now();
         let block_env = self.parse_block_env(block)?;
         
         // Create shared database with prefetched state
@@ -263,33 +264,30 @@ impl WilliamsExecutor {
 
         // Pre-allocate results vector (optimization: avoid reallocations)
         let mut tx_results = Vec::with_capacity(tx_count);
+        let setup_time = setup_start.elapsed();
 
         // Execute all transactions in order (using pre-parsed data)
+        let exec_start = std::time::Instant::now();
         for (idx, parsed_tx) in parsed_txs.iter().enumerate() {
             let result = self.execute_single_tx(idx, parsed_tx, &block_env, &cfg_env, &mut db)?;
             tx_results.push(result);
         }
+        let exec_time = exec_start.elapsed();
 
-        println!("✓ Sequential execution complete");
-
+        
         // PHASE 3: ORDERED COMMIT (deterministic final state)
-        println!("\nApplying state changes in order...");
+        let commit_start = std::time::Instant::now();
         
         let success_count = tx_results.iter().filter(|r| r.success).count();
-        println!("✓ State committed (deterministic order)");
-        println!("  Executed: {}/{} transactions (100% execution rate)", tx_count, tx_count);
-        println!("  Successful: {} ({:.1}% - reverts expected without full state)", 
-            success_count,
-            100.0 * success_count as f64 / tx_count.max(1) as f64
-        );
-
-        let execution_time = start.elapsed().as_micros();
+        let commit_time = commit_start.elapsed();
+        
+        // Generate receipts
+        let receipt_start = std::time::Instant::now();
         
         // Calculate total gas used
         let total_gas: u64 = tx_results.iter().map(|r| r.gas_used).sum();
         println!("  Total gas used: {} gas", total_gas);
 
-        // Generate receipts (Ethereum-compatible) - pre-allocate, use cached parsed data
         let mut tx_receipts = Vec::with_capacity(tx_count);
         for (parsed_tx, result) in parsed_txs.iter().zip(&tx_results) {
             let receipt = TxReceipt {
@@ -305,9 +303,37 @@ impl WilliamsExecutor {
             };
             tx_receipts.push(receipt);
         }
+        let receipt_time = receipt_start.elapsed();
 
         // Compute final state root from database
+        let state_root_start = std::time::Instant::now();
         let final_state_root = db.compute_state_root();
+        let state_root_time = state_root_start.elapsed();
+
+        let total_time = total_start.elapsed();
+        
+        // Print detailed profiling
+        println!("\n{}", "=".repeat(70));
+        println!("PERFORMANCE PROFILE - Block {}", block_number);
+        println!("{}", "=".repeat(70));
+        println!("Block parsing:        {:>8.2} ms ({:>5.1}%)", parse_time.as_secs_f64() * 1000.0, 100.0 * parse_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("Tx JSON parsing:      {:>8.2} ms ({:>5.1}%)", tx_parse_time.as_secs_f64() * 1000.0, 100.0 * tx_parse_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("Address collection:   {:>8.2} ms ({:>5.1}%)", addr_collect_time.as_secs_f64() * 1000.0, 100.0 * addr_collect_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("State prefetch:       {:>8.2} ms ({:>5.1}%)", prefetch_time.as_secs_f64() * 1000.0, 100.0 * prefetch_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("Setup (env/db/cfg):   {:>8.2} ms ({:>5.1}%)", setup_time.as_secs_f64() * 1000.0, 100.0 * setup_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("EVM EXECUTION:        {:>8.2} ms ({:>5.1}%) ← CORE", exec_time.as_secs_f64() * 1000.0, 100.0 * exec_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("State commit:         {:>8.2} ms ({:>5.1}%)", commit_time.as_secs_f64() * 1000.0, 100.0 * commit_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("Receipt generation:   {:>8.2} ms ({:>5.1}%)", receipt_time.as_secs_f64() * 1000.0, 100.0 * receipt_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("State root compute:   {:>8.2} ms ({:>5.1}%)", state_root_time.as_secs_f64() * 1000.0, 100.0 * state_root_time.as_secs_f64() / total_time.as_secs_f64());
+        println!("{}", "-".repeat(70));
+        println!("TOTAL TIME:           {:>8.2} ms (100.0%)", total_time.as_secs_f64() * 1000.0);
+        println!("Per-tx average:       {:>8.2} µs", total_time.as_micros() as f64 / tx_count as f64);
+        println!("{}", "=".repeat(70));
+        println!("Executed: {}/{} transactions (100.0%)", tx_count, tx_count);
+        println!("Successful: {} ({:.1}%)", success_count, 100.0 * success_count as f64 / tx_count.max(1) as f64);
+        println!("{}", "=".repeat(70));
+
+        let execution_time = total_time.as_micros();
 
         Ok(BlockExecutionResult {
             block_number,

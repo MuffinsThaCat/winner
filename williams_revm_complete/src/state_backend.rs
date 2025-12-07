@@ -3,7 +3,7 @@
 
 use anyhow::{Result, Context};
 use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo, KECCAK_EMPTY};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, RwLock};
 use serde_json::{json, Value};
 
@@ -12,9 +12,9 @@ use serde_json::{json, Value};
 pub struct RpcStateBackend {
     rpc_url: String,
     block_number: u64,
-    cache: Arc<RwLock<HashMap<Address, AccountInfo>>>,
-    code_cache: Arc<RwLock<HashMap<Address, Bytecode>>>,
-    storage_cache: Arc<RwLock<HashMap<(Address, U256), U256>>>,
+    cache: Arc<RwLock<FxHashMap<Address, AccountInfo>>>,
+    code_cache: Arc<RwLock<FxHashMap<Address, Bytecode>>>,
+    storage_cache: Arc<RwLock<FxHashMap<(Address, U256), U256>>>,
     client: reqwest::blocking::Client,
 }
 
@@ -23,9 +23,9 @@ impl RpcStateBackend {
         Self {
             rpc_url,
             block_number,
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            code_cache: Arc::new(RwLock::new(HashMap::new())),
-            storage_cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(FxHashMap::default())),
+            code_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            storage_cache: Arc::new(RwLock::new(FxHashMap::default())),
             client: reqwest::blocking::Client::new(),
         }
     }
@@ -199,10 +199,10 @@ impl RpcStateBackend {
 /// Uses reasonable defaults for accounts
 #[derive(Clone)]
 pub struct OfflineStateBackend {
-    cache: Arc<RwLock<HashMap<Address, AccountInfo>>>,
-    storage: Arc<RwLock<HashMap<(Address, U256), U256>>>,
-    bytecode: Arc<RwLock<HashMap<B256, Bytecode>>>,
-    eoa_addresses: Arc<RwLock<HashSet<Address>>>, // Addresses that MUST be EOAs
+    cache: Arc<RwLock<FxHashMap<Address, AccountInfo>>>,
+    storage: Arc<RwLock<FxHashMap<(Address, U256), U256>>>,
+    bytecode: Arc<RwLock<FxHashMap<B256, Bytecode>>>,
+    eoa_addresses: Arc<RwLock<FxHashSet<Address>>>, // Addresses that MUST be EOAs
     default_balance: U256,
 }
 
@@ -213,10 +213,10 @@ impl OfflineStateBackend {
         let default_balance = U256::from(1000u64) * U256::from(10u128.pow(18));
         
         Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            storage: Arc::new(RwLock::new(HashMap::new())),
-            bytecode: Arc::new(RwLock::new(HashMap::new())),
-            eoa_addresses: Arc::new(RwLock::new(HashSet::new())),
+            cache: Arc::new(RwLock::new(FxHashMap::default())),
+            storage: Arc::new(RwLock::new(FxHashMap::default())),
+            bytecode: Arc::new(RwLock::new(FxHashMap::default())),
+            eoa_addresses: Arc::new(RwLock::new(FxHashSet::default())),
             default_balance,
         }
     }
@@ -235,13 +235,14 @@ impl OfflineStateBackend {
     }
 
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {
-        let eoa_set = self.eoa_addresses.read().unwrap();
+        // Pre-allocate with exact capacity for better performance
         let mut cache = self.cache.write().unwrap();
+        cache.reserve(addresses.len());
+        
+        // Read EOA set once (avoid repeated lock acquisition)
+        let eoa_set = self.eoa_addresses.read().unwrap();
         
         for addr in addresses {
-            // Check if this is a marked EOA
-            let is_eoa = eoa_set.contains(addr);
-            
             cache.entry(*addr).or_insert_with(|| {
                 // All addresses are EOAs by default for benchmarking
                 // This prevents EIP-3607 RejectCallerWithCode errors
