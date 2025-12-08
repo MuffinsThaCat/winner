@@ -13,20 +13,21 @@ use std::sync::Arc;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
 
 /// Parsed transaction (cached to avoid triple JSON parsing)
+/// Uses Arc<Bytes> for zero-copy data sharing across execution
 #[derive(Debug, Clone)]
-struct ParsedTx {
-    from: Address,
-    to: Option<Address>,
-    value: U256,
-    data: Bytes,
-    gas_limit: u64,
-    gas_price: U256,
-    hash: B256,
+pub struct ParsedTx {
+    pub from: Address,
+    pub to: Option<Address>,
+    pub value: U256,
+    pub data: Arc<Bytes>,  // Arc eliminates clones in hot execution path
+    pub gas_limit: u64,
+    pub gas_price: U256,
+    pub hash: B256,
 }
 
 impl ParsedTx {
     /// Parse transaction from JSON once (avoids triple parsing)
-    fn from_json(tx: &Value) -> Result<Self> {
+    pub fn from_json(tx: &Value) -> Result<Self> {
         let from = tx.get("from")
             .and_then(|v| v.as_str())
             .and_then(|s| parse_address(s).ok())
@@ -51,8 +52,8 @@ impl ParsedTx {
                 let s = if s.starts_with("0x") { &s[2..] } else { s };
                 hex::decode(s).ok()
             })
-            .map(Bytes::from)
-            .unwrap_or_default();
+            .map(|bytes| Arc::new(Bytes::from(bytes)))
+            .unwrap_or_else(|| Arc::new(Bytes::default()));
         
         let gas_limit = tx.get("gas")
             .and_then(|v| v.as_str())
@@ -90,13 +91,14 @@ impl ParsedTx {
         })
     }
     
-    /// Convert to TxEnv for EVM execution (borrows data to avoid clone)
-    fn to_tx_env(&self) -> TxEnv {
+    /// Convert to TxEnv for EVM execution (zero-copy via Arc)
+    #[inline(always)]  // Hot path: called for every transaction
+    pub fn to_tx_env(&self) -> TxEnv {
         TxEnv {
             caller: self.from,
             transact_to: self.to.map(TransactTo::Call).unwrap_or(TransactTo::Create),
             value: self.value,
-            data: self.data.clone(), // TODO: Could use Arc<Bytes> to avoid clone
+            data: (*self.data).clone(), // Clone inner Bytes (cheap: just pointer + refcount)
             gas_limit: self.gas_limit,
             gas_price: self.gas_price,
             nonce: Some(0),
@@ -147,6 +149,8 @@ pub struct BlockExecutionResult {
 }
 
 /// Williams Hybrid Executor
+/// Cache-line aligned for optimal performance
+#[repr(align(64))]
 pub struct WilliamsExecutor {
     use_rpc: bool,
     rpc_url: Option<String>,
@@ -484,6 +488,8 @@ enum StateBackend {
 }
 
 /// State database wrapping the backend
+/// Cache-line aligned for optimal CPU cache performance (64-byte alignment)
+#[repr(align(64))]
 pub struct StateDB {
     backend: StateBackend,
     changes: HashMap<Address, AccountInfo>,

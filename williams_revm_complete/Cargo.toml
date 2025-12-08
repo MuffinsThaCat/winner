@@ -3,6 +3,10 @@ name = "williams-hybrid-complete"
 version = "1.0.0"
 edition = "2021"
 
+[features]
+default = []
+bench = []  # Disable verbose logging for benchmarking
+
 [dependencies]
 revm = { version = "10.0", default-features = false, features = ["std", "secp256k1"] }
 anyhow = "1.0"
@@ -21,3 +25,11 @@ rustc-hash = "2.0"
 [[bin]]
 name = "williams-complete"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = 3              # Maximum optimization
+lto = "fat"                # Full Link-Time Optimization across all crates
+codegen-units = 1          # Better optimization, slower compile
+panic = "abort"            # Smaller binary, faster unwinding
+strip = true               # Strip debug symbols
+debug = false              # No debug info in release

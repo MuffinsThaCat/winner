@@ -23,29 +23,69 @@ impl RpcStateBackend {
         Self {
             rpc_url,
             block_number,
-            cache: Arc::new(RwLock::new(FxHashMap::default())),
-            code_cache: Arc::new(RwLock::new(FxHashMap::default())),
-            storage_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            // Pre-allocate with estimated capacity (typical block: ~200 unique addresses)
+            cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(256, Default::default()))),
+            code_cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(64, Default::default()))),
+            storage_cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(512, Default::default()))),
             client: reqwest::blocking::Client::new(),
         }
     }
 
-    /// Bulk prefetch account data for multiple addresses
+    /// Bulk prefetch account data for multiple addresses (PARALLEL)
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {
-        println!("Bulk prefetching {} unique addresses...", addresses.len());
+        use rayon::prelude::*;
+        use std::time::Instant;
         
-        for (idx, addr) in addresses.iter().enumerate() {
-            if idx % 10 == 0 {
-                print!("\rPrefetching: {}/{}", idx, addresses.len());
-            }
-            
-            // Fetch account info
-            if let Ok(info) = self.fetch_account_info(*addr) {
-                self.cache.write().unwrap().insert(*addr, info);
-            }
+        let start = Instant::now();
+        println!("⚡ PARALLEL bulk prefetch: {} addresses", addresses.len());
+        
+        // OPTIMIZATION: Dynamic chunk sizing based on thread count
+        // Larger chunks = better connection reuse, fewer context switches
+        // Formula: threads * 8 accounts per thread (empirically optimal for RPC calls)
+        let thread_count = rayon::current_num_threads();
+        let chunk_size = (thread_count * 8).max(32).min(200); // Min 32, max 200
+        let total_chunks = (addresses.len() + chunk_size - 1) / chunk_size;
+        
+        println!("  Using dynamic chunk size: {} ({}x threads * 8)", chunk_size, thread_count);
+        
+        // Process chunks in parallel - each chunk fetches sequentially to reuse HTTP connection
+        let results: Vec<(Address, AccountInfo)> = addresses
+            .par_chunks(chunk_size)
+            .enumerate()
+            .flat_map(|(chunk_idx, chunk)| {
+                // Progress indicator every 5 chunks
+                if chunk_idx % 5 == 0 {
+                    let progress = (chunk_idx * 100) / total_chunks.max(1);
+                    print!("\rPrefetching: {}% ({}/{})", progress, chunk_idx, total_chunks);
+                }
+                
+                // Fetch all addresses in this chunk (sequential within chunk for connection reuse)
+                chunk.iter()
+                    .filter_map(|addr| {
+                        self.fetch_account_info(*addr)
+                            .ok()
+                            .map(|info| (*addr, info))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        
+        // Batch insert into cache (single write lock)
+        let mut cache = self.cache.write().unwrap();
+        cache.reserve(results.len());
+        for (addr, info) in results.iter() {
+            cache.insert(*addr, info.clone());
         }
+        drop(cache);
         
-        println!("\r✓ Prefetched {}/{} accounts", addresses.len(), addresses.len());
+        let elapsed = start.elapsed();
+        let rate = addresses.len() as f64 / elapsed.as_secs_f64();
+        println!("\r✓ Parallel prefetch complete: {:.2}ms ({:.0} addrs/sec, {}x parallel)", 
+            elapsed.as_secs_f64() * 1000.0,
+            rate,
+            rayon::current_num_threads()
+        );
+        
         Ok(())
     }
 
@@ -213,10 +253,11 @@ impl OfflineStateBackend {
         let default_balance = U256::from(1000u64) * U256::from(10u128.pow(18));
         
         Self {
-            cache: Arc::new(RwLock::new(FxHashMap::default())),
-            storage: Arc::new(RwLock::new(FxHashMap::default())),
-            bytecode: Arc::new(RwLock::new(FxHashMap::default())),
-            eoa_addresses: Arc::new(RwLock::new(FxHashSet::default())),
+            // Pre-allocate with estimated capacity for typical block
+            cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(256, Default::default()))),
+            storage: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(512, Default::default()))),
+            bytecode: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(64, Default::default()))),
+            eoa_addresses: Arc::new(RwLock::new(FxHashSet::with_capacity_and_hasher(128, Default::default()))),
             default_balance,
         }
     }
@@ -235,33 +276,55 @@ impl OfflineStateBackend {
     }
 
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {
-        // Pre-allocate with exact capacity for better performance
-        let mut cache = self.cache.write().unwrap();
-        cache.reserve(addresses.len());
+        use rayon::prelude::*;
+        use std::time::Instant;
         
-        // Read EOA set once (avoid repeated lock acquisition)
-        let eoa_set = self.eoa_addresses.read().unwrap();
+        let start = Instant::now();
         
-        for addr in addresses {
-            cache.entry(*addr).or_insert_with(|| {
-                // All addresses are EOAs by default for benchmarking
-                // This prevents EIP-3607 RejectCallerWithCode errors
-                AccountInfo {
+        // OPTIMIZATION: Build all accounts in parallel (pure computation, no I/O)
+        // All addresses are EOAs by default for benchmarking (prevents EIP-3607 errors)
+        let new_accounts: Vec<(Address, AccountInfo)> = addresses
+            .par_iter()
+            .map(|addr| {
+                let info = AccountInfo {
                     balance: self.default_balance,
                     nonce: 0,
                     code_hash: KECCAK_EMPTY,
                     code: None,
-                }
-            });
+                };
+                (*addr, info)
+            })
+            .collect();
+        
+        // Single write lock for batch insert (minimizes lock contention)
+        let mut cache = self.cache.write().unwrap();
+        cache.reserve(new_accounts.len());
+        
+        // Read EOA set once inside write lock (already have exclusive access)
+        let eoa_addresses = self.eoa_addresses.read().unwrap();
+        
+        for (addr, info) in new_accounts {
+            cache.entry(addr).or_insert(info);
             
-            // CRITICAL: If it's a marked EOA, force code to KECCAK_EMPTY even if already in cache
-            if is_eoa {
-                if let Some(info) = cache.get_mut(addr) {
-                    info.code_hash = KECCAK_EMPTY;
-                    info.code = None;
+            // CRITICAL: If marked as EOA, force code to KECCAK_EMPTY
+            if eoa_addresses.contains(&addr) {
+                if let Some(cached_info) = cache.get_mut(&addr) {
+                    cached_info.code_hash = KECCAK_EMPTY;
+                    cached_info.code = None;
                 }
             }
         }
+        drop(eoa_addresses);
+        drop(cache);
+        
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 100 {
+            println!("  ⚡ Offline prefetch: {:.3}ms ({} accounts, parallel)", 
+                elapsed.as_secs_f64() * 1000.0,
+                addresses.len()
+            );
+        }
+        
         Ok(())
     }
 

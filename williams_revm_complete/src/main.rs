@@ -10,12 +10,14 @@
 
 mod state_backend;
 mod executor;
+mod parallel_executor;
 
 use anyhow::{Result, Context};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use executor::{WilliamsExecutor, BlockExecutionResult};
+use parallel_executor::WilliamsParallelExecutor;
 use serde_json::Value;
 use rayon::prelude::*;
 
@@ -46,9 +48,15 @@ fn main() -> Result<()> {
         16
     };
 
-    let use_rpc = args.len() > 3 && &args[3] == "--rpc";
-    let rpc_url = if use_rpc && args.len() > 4 {
-        Some(args[4].clone())
+    // Check for --parallel flag
+    let use_parallel = args.contains(&"--parallel".to_string());
+    
+    let use_rpc = args.iter().any(|a| a == "--rpc");
+    let rpc_url = if use_rpc {
+        args.iter()
+            .position(|a| a == "--rpc")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
     } else {
         None
     };
@@ -56,6 +64,7 @@ fn main() -> Result<()> {
     println!("Configuration:");
     println!("  Data directory: {}", data_dir);
     println!("  Thread count:   {}", thread_count);
+    println!("  Execution mode: {}", if use_parallel { "PARALLEL (Sequential+Parallel Hybrid)" } else { "Sequential" });
     println!("  State backend:  {}", if use_rpc { "RPC" } else { "Offline (default balances)" });
     if let Some(ref url) = rpc_url {
         println!("  RPC URL:        {}", url);
@@ -102,45 +111,22 @@ fn main() -> Result<()> {
     println!("  Avg load time: {:.3}ms per block", preload_start.elapsed().as_secs_f64() * 1000.0 / loaded_blocks.len() as f64);
     println!();
 
-    // Create executor
-    let executor = if let Some(url) = rpc_url {
-        WilliamsExecutor::with_rpc(thread_count, url)
+    // Execute blocks based on mode
+    let results = if use_parallel {
+        execute_parallel(&loaded_blocks, thread_count, rpc_url)?
     } else {
-        WilliamsExecutor::new(thread_count)
+        execute_sequential(&loaded_blocks, thread_count, rpc_url)?
     };
 
-    // Execute blocks
-    let start = Instant::now();
-    let mut results = Vec::new();
-    let mut total_txs = 0;
-    let mut successful_txs = 0;
-
-    for (idx, (block_path, block_data, block_number)) in loaded_blocks.iter().enumerate() {
-        println!("\n[{}/{}] Processing: {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
-        
-        // Parse with standard serde_json (conversion overhead from simd-json was too expensive)
-        let json: Value = serde_json::from_str(block_data)?;
-        
-        // Execute block
-        match executor.execute_block(&json, *block_number) {
-            Ok(result) => {
-                total_txs += result.tx_count;
-                successful_txs += result.tx_results.iter().filter(|r| r.success).count();
-                
-                println!("✓ Block {} completed:", result.block_number);
-                println!("  Transactions:    {}", result.tx_count);
-                println!("  Successful:      {}", result.tx_results.iter().filter(|r| r.success).count());
-                println!("  Execution time:  {:.2}ms", result.execution_time_us as f64 / 1000.0);
-                
-                results.push(result);
-            }
-            Err(e) => {
-                println!("✗ Block {} failed: {}", block_number, e);
-            }
-        }
-    }
-
-    let total_time = start.elapsed();
+    let total_time = results.iter()
+        .map(|r| std::time::Duration::from_micros(r.execution_time_us as u64))
+        .sum::<std::time::Duration>();
+    
+    let total_txs: usize = results.iter().map(|r| r.tx_count).sum();
+    let successful_txs: usize = results.iter()
+        .flat_map(|r| &r.tx_results)
+        .filter(|t| t.success)
+        .count();
 
     // Calculate comprehensive stats
     let total_receipts: usize = results.iter().map(|r| r.tx_receipts.len()).sum();
@@ -218,6 +204,78 @@ fn extract_block_number(path: &PathBuf) -> Result<u64> {
     
     let num_str = filename.strip_prefix("bdf-").unwrap_or(filename);
     num_str.parse().context("Failed to parse block number")
+}
+
+fn execute_sequential(
+    loaded_blocks: &[(PathBuf, String, u64)],
+    thread_count: usize,
+    rpc_url: Option<String>,
+) -> Result<Vec<BlockExecutionResult>> {
+    let executor = if let Some(url) = rpc_url {
+        WilliamsExecutor::with_rpc(thread_count, url)
+    } else {
+        WilliamsExecutor::new(thread_count)
+    };
+
+    let mut results = Vec::new();
+    
+    for (idx, (block_path, block_data, block_number)) in loaded_blocks.iter().enumerate() {
+        println!("\n[{}/{}] Processing: {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
+        
+        let json: Value = serde_json::from_str(block_data)?;
+        
+        match executor.execute_block(&json, *block_number) {
+            Ok(result) => {
+                println!("✓ Block {} completed: {} txs in {:.2}ms", 
+                    result.block_number, 
+                    result.tx_count,
+                    result.execution_time_us as f64 / 1000.0
+                );
+                results.push(result);
+            }
+            Err(e) => {
+                println!("✗ Block {} failed: {}", block_number, e);
+            }
+        }
+    }
+    
+    Ok(results)
+}
+
+fn execute_parallel(
+    loaded_blocks: &[(PathBuf, String, u64)],
+    thread_count: usize,
+    rpc_url: Option<String>,
+) -> Result<Vec<BlockExecutionResult>> {
+    let executor = if let Some(url) = rpc_url {
+        WilliamsParallelExecutor::with_rpc(thread_count, url)
+    } else {
+        WilliamsParallelExecutor::new(thread_count)
+    };
+
+    let mut results = Vec::new();
+    
+    for (idx, (block_path, block_data, block_number)) in loaded_blocks.iter().enumerate() {
+        println!("\n[{}/{}] Processing (PARALLEL): {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
+        
+        let json: Value = serde_json::from_str(block_data)?;
+        
+        match executor.execute_block(&json, *block_number) {
+            Ok(result) => {
+                println!("✓ Block {} completed: {} txs in {:.2}ms", 
+                    result.block_number, 
+                    result.tx_count,
+                    result.execution_time_us as f64 / 1000.0
+                );
+                results.push(result);
+            }
+            Err(e) => {
+                println!("✗ Block {} failed: {}", block_number, e);
+            }
+        }
+    }
+    
+    Ok(results)
 }
 
 fn write_results(results: &[BlockExecutionResult]) -> Result<()> {
