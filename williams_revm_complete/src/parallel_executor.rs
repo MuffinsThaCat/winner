@@ -472,24 +472,23 @@ impl ParallelStateDB {
 
     /// Compute state root from all account changes
     fn compute_state_root(&self) -> B256 {
-        use sha3::{Digest, Keccak256};
-        
+        // OPTIMIZATION: Use REVM's optimized keccak256 instead of sha3 crate
         let changes = self.changes.lock().unwrap();
-        let mut hasher = Keccak256::new();
+        let mut data = Vec::with_capacity(changes.len() * 100);
         
         let mut addresses: Vec<_> = changes.keys().collect();
         addresses.sort();
         
         for addr in addresses {
             if let Some(account) = changes.get(addr) {
-                hasher.update(addr.as_slice());
-                hasher.update(&account.balance.to_be_bytes::<32>());
-                hasher.update(&account.nonce.to_be_bytes());
-                hasher.update(account.code_hash.as_slice());
+                data.extend_from_slice(addr.as_slice());
+                data.extend_from_slice(&account.balance.to_be_bytes::<32>());
+                data.extend_from_slice(&account.nonce.to_be_bytes());
+                data.extend_from_slice(account.code_hash.as_slice());
             }
         }
         
-        B256::from_slice(&hasher.finalize())
+        revm::primitives::keccak256(&data)
     }
 }
 

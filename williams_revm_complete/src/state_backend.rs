@@ -6,6 +6,7 @@ use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo, KECCAK
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, RwLock};
 use serde_json::{json, Value};
+use dashmap::DashMap;
 
 /// Real state backend that fetches from RPC
 #[derive(Clone)]
@@ -37,6 +38,7 @@ impl RpcStateBackend {
         use std::time::Instant;
         
         let start = Instant::now();
+        #[cfg(not(feature = "quiet"))]
         println!("⚡ PARALLEL bulk prefetch: {} addresses", addresses.len());
         
         // OPTIMIZATION: Dynamic chunk sizing based on thread count
@@ -46,6 +48,7 @@ impl RpcStateBackend {
         let chunk_size = (thread_count * 8).max(32).min(200); // Min 32, max 200
         let total_chunks = (addresses.len() + chunk_size - 1) / chunk_size;
         
+        #[cfg(not(feature = "quiet"))]
         println!("  Using dynamic chunk size: {} ({}x threads * 8)", chunk_size, thread_count);
         
         // Process chunks in parallel - each chunk fetches sequentially to reuse HTTP connection
@@ -70,21 +73,21 @@ impl RpcStateBackend {
             })
             .collect();
         
-        // Batch insert into cache (single write lock)
+        // OPTIMIZATION: Batch insert using extend (single write lock, no loop overhead)
         let mut cache = self.cache.write().unwrap();
-        cache.reserve(results.len());
-        for (addr, info) in results.iter() {
-            cache.insert(*addr, info.clone());
-        }
+        cache.extend(results.into_iter());
         drop(cache);
         
         let elapsed = start.elapsed();
-        let rate = addresses.len() as f64 / elapsed.as_secs_f64();
-        println!("\r✓ Parallel prefetch complete: {:.2}ms ({:.0} addrs/sec, {}x parallel)", 
-            elapsed.as_secs_f64() * 1000.0,
-            rate,
-            rayon::current_num_threads()
-        );
+        #[cfg(not(feature = "quiet"))]
+        {
+            let rate = addresses.len() as f64 / elapsed.as_secs_f64();
+            println!("\r✓ Parallel prefetch complete: {:.2}ms ({:.0} addrs/sec, {}x parallel)", 
+                elapsed.as_secs_f64() * 1000.0,
+                rate,
+                rayon::current_num_threads()
+            );
+        }
         
         Ok(())
     }
@@ -239,10 +242,11 @@ impl RpcStateBackend {
 /// Uses reasonable defaults for accounts
 #[derive(Clone)]
 pub struct OfflineStateBackend {
-    cache: Arc<RwLock<FxHashMap<Address, AccountInfo>>>,
-    storage: Arc<RwLock<FxHashMap<(Address, U256), U256>>>,
-    bytecode: Arc<RwLock<FxHashMap<B256, Bytecode>>>,
-    eoa_addresses: Arc<RwLock<FxHashSet<Address>>>, // Addresses that MUST be EOAs
+    // OPTIMIZATION: Use DashMap + Arc<AccountInfo> for lock-free access with cheap clones
+    cache: Arc<DashMap<Address, Arc<AccountInfo>>>,
+    storage: Arc<DashMap<(Address, U256), U256>>,
+    bytecode: Arc<DashMap<B256, Bytecode>>,
+    eoa_addresses: Arc<DashMap<Address, ()>>, // Addresses that MUST be EOAs
     default_balance: U256,
 }
 
@@ -253,11 +257,11 @@ impl OfflineStateBackend {
         let default_balance = U256::from(1000u64) * U256::from(10u128.pow(18));
         
         Self {
-            // Pre-allocate with estimated capacity for typical block
-            cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(256, Default::default()))),
-            storage: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(512, Default::default()))),
-            bytecode: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(64, Default::default()))),
-            eoa_addresses: Arc::new(RwLock::new(FxHashSet::with_capacity_and_hasher(128, Default::default()))),
+            // OPTIMIZATION: DashMap with pre-allocated capacity
+            cache: Arc::new(DashMap::with_capacity(256)),
+            storage: Arc::new(DashMap::with_capacity(512)),
+            bytecode: Arc::new(DashMap::with_capacity(64)),
+            eoa_addresses: Arc::new(DashMap::with_capacity(128)),
             default_balance,
         }
     }
@@ -265,13 +269,15 @@ impl OfflineStateBackend {
     /// Mark an address as EOA (must not have code)
     /// Used for sender addresses to prevent EIP-3607 errors
     pub fn mark_as_eoa(&self, address: Address) {
-        self.eoa_addresses.write().unwrap().insert(address);
+        // OPTIMIZATION: Lock-free insert with DashMap
+        self.eoa_addresses.insert(address, ());
         
         // CRITICAL: Also update cache immediately to remove any code
-        let mut cache = self.cache.write().unwrap();
-        if let Some(info) = cache.get_mut(&address) {
+        if let Some(info_arc) = self.cache.get(&address) {
+            let mut info = (**info_arc).clone();
             info.code_hash = KECCAK_EMPTY;
             info.code = None;
+            self.cache.insert(address, Arc::new(info));
         }
     }
 
@@ -296,47 +302,36 @@ impl OfflineStateBackend {
             })
             .collect();
         
-        // Single write lock for batch insert (minimizes lock contention)
-        let mut cache = self.cache.write().unwrap();
-        cache.reserve(new_accounts.len());
-        
-        // Read EOA set once inside write lock (already have exclusive access)
-        let eoa_addresses = self.eoa_addresses.read().unwrap();
-        
-        for (addr, info) in new_accounts {
-            cache.entry(addr).or_insert(info);
-            
+        // OPTIMIZATION: Lock-free batch insert with DashMap + Arc
+        for (addr, mut info) in new_accounts {
             // CRITICAL: If marked as EOA, force code to KECCAK_EMPTY
-            if eoa_addresses.contains(&addr) {
-                if let Some(cached_info) = cache.get_mut(&addr) {
-                    cached_info.code_hash = KECCAK_EMPTY;
-                    cached_info.code = None;
-                }
+            if self.eoa_addresses.contains_key(&addr) {
+                info.code_hash = KECCAK_EMPTY;
+                info.code = None;
             }
+            self.cache.insert(addr, Arc::new(info));
         }
-        drop(eoa_addresses);
-        drop(cache);
         
-        let elapsed = start.elapsed();
-        if elapsed.as_micros() > 100 {
-            println!("  ⚡ Offline prefetch: {:.3}ms ({} accounts, parallel)", 
-                elapsed.as_secs_f64() * 1000.0,
-                addresses.len()
-            );
+        #[cfg(not(feature = "quiet"))]
+        {
+            let elapsed = start.elapsed();
+            if elapsed.as_micros() > 100 {
+                println!("  ⚡ Offline prefetch: {:.3}ms ({} accounts, parallel)", 
+                    elapsed.as_secs_f64() * 1000.0,
+                    addresses.len()
+                );
+            }
         }
         
         Ok(())
     }
 
+    #[inline(always)]  // OPTIMIZATION: Inline hot path
     pub fn get_account(&self, address: Address) -> AccountInfo {
-        let cache = self.cache.read().unwrap();
-        if let Some(info) = cache.get(&address) {
-            return info.clone();
+        // OPTIMIZATION: Lock-free get with DashMap + Arc (cheap clone = refcount bump)
+        if let Some(info_arc) = self.cache.get(&address) {
+            return (**info_arc).clone();
         }
-        drop(cache);
-        
-        // Check if this is a marked EOA address
-        let is_eoa = self.eoa_addresses.read().unwrap().contains(&address);
         
         // Not in cache - treat as EOA
         // For offline benchmarking, all addresses are EOAs with sufficient balance
@@ -348,28 +343,35 @@ impl OfflineStateBackend {
             code: None,
         };
         
-        self.cache.write().unwrap().insert(address, info.clone());
+        // Lock-free insert with Arc
+        self.cache.insert(address, Arc::new(info.clone()));
         info
     }
 
+    #[inline(always)]  // OPTIMIZATION: Inline hot path
     pub fn get_storage(&self, address: Address, index: U256) -> U256 {
-        let storage = self.storage.read().unwrap();
-        storage.get(&(address, index)).copied().unwrap_or(U256::ZERO)
+        // OPTIMIZATION: Lock-free get with DashMap
+        self.storage.get(&(address, index)).map(|v| *v).unwrap_or(U256::ZERO)
     }
 
+    #[inline(always)]  // OPTIMIZATION: Inline hot path
     pub fn set_storage(&self, address: Address, index: U256, value: U256) {
-        self.storage.write().unwrap().insert((address, index), value);
+        // OPTIMIZATION: Lock-free insert with DashMap
+        self.storage.insert((address, index), value);
     }
 
     pub fn set_bytecode(&self, code_hash: B256, code: Bytecode) {
-        self.bytecode.write().unwrap().insert(code_hash, code);
+        // OPTIMIZATION: Lock-free insert with DashMap
+        self.bytecode.insert(code_hash, code);
     }
 
     pub fn get_bytecode(&self, code_hash: B256) -> Option<Bytecode> {
-        self.bytecode.read().unwrap().get(&code_hash).cloned()
+        // OPTIMIZATION: Lock-free get with DashMap
+        self.bytecode.get(&code_hash).map(|v| v.clone())
     }
 
     pub fn update_account(&self, address: Address, info: AccountInfo) {
-        self.cache.write().unwrap().insert(address, info);
+        // OPTIMIZATION: Lock-free insert with DashMap + Arc
+        self.cache.insert(address, Arc::new(info));
     }
 }

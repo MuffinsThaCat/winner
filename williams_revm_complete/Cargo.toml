@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 bench = []  # Disable verbose logging for benchmarking
+quiet = []  # Minimal output for maximum performance
 
 [dependencies]
 revm = { version = "10.0", default-features = false, features = ["std", "secp256k1"] }
@@ -21,6 +22,8 @@ sha3 = "0.10"
 lru = "0.12"
 parking_lot = "0.12"
 rustc-hash = "2.0"
+mimalloc = { version = "0.1", default-features = false }
+dashmap = "5.5"
 
 [[bin]]
 name = "williams-complete"
@@ -33,3 +36,16 @@ codegen-units = 1          # Better optimization, slower compile
 panic = "abort"            # Smaller binary, faster unwinding
 strip = true               # Strip debug symbols
 debug = false              # No debug info in release
+
+[profile.release.build-override]
+opt-level = 3
+
+# Profile for PGO instrumentation
+[profile.pgo-instrument]
+inherits = "release"
+codegen-units = 1
+
+# Profile for PGO-optimized build
+[profile.pgo-optimize]
+inherits = "release"
+codegen-units = 1

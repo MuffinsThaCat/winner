@@ -1,0 +1,8 @@
+# OPTIMIZATION: Aggressive CPU-specific optimizations for maximum performance
+# Enables AVX2, FMA, and other CPU-specific instructions + aggressive opts
+[build]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "opt-level=3",
+    "-C", "llvm-args=-inline-threshold=1000"  # More aggressive inlining
+]
