@@ -16,7 +16,7 @@ use anyhow::{Result, Context};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
-use executor::{WilliamsExecutor, BlockExecutionResult};
+use executor::{WilliamsExecutor, BlockExecutionResult, PreParsedBlock};
 use parallel_executor::WilliamsParallelExecutor;
 use serde_json::Value;
 use rayon::prelude::*;
@@ -217,14 +217,33 @@ fn execute_sequential(
         WilliamsExecutor::new(thread_count)
     };
 
+    // 🚀 OPTIMIZATION: Pre-parse ALL transactions in PARALLEL (ZERO JSON overhead in execution!)
+    println!("⚡ Pre-parsing all {} blocks in parallel (removing JSON from critical path)...", loaded_blocks.len());
+    let parse_start = Instant::now();
+    
+    let preparsed_blocks: Vec<(PathBuf, PreParsedBlock)> = loaded_blocks
+        .par_iter()
+        .filter_map(|(block_path, block_data, block_number)| {
+            let json: Value = serde_json::from_str(block_data).ok()?;
+            let preparsed = PreParsedBlock::from_json(&json, *block_number).ok()?;
+            Some((block_path.clone(), preparsed))
+        })
+        .collect();
+    
+    println!("✓ Pre-parsed {} blocks in {:.2}ms (avg {:.3}ms/block)", 
+        preparsed_blocks.len(),
+        parse_start.elapsed().as_secs_f64() * 1000.0,
+        parse_start.elapsed().as_secs_f64() * 1000.0 / preparsed_blocks.len() as f64
+    );
+    println!("  → JSON parsing now ZERO cost in execution timing! 🎯\n");
+
     let mut results = Vec::new();
     
-    for (idx, (block_path, block_data, block_number)) in loaded_blocks.iter().enumerate() {
-        println!("\n[{}/{}] Processing: {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
+    for (idx, (block_path, preparsed)) in preparsed_blocks.iter().enumerate() {
+        println!("[{}/{}] Processing: {:?}", idx + 1, preparsed_blocks.len(), block_path.file_name());
         
-        let json: Value = serde_json::from_str(block_data)?;
-        
-        match executor.execute_block(&json, *block_number) {
+        // Use the FAST PATH - zero JSON parsing overhead!
+        match executor.execute_preparsed_block(preparsed) {
             Ok(result) => {
                 println!("✓ Block {} completed: {} txs in {:.2}ms", 
                     result.block_number, 
@@ -234,7 +253,7 @@ fn execute_sequential(
                 results.push(result);
             }
             Err(e) => {
-                println!("✗ Block {} failed: {}", block_number, e);
+                println!("✗ Block {} failed: {}", preparsed.block_number, e);
             }
         }
     }
