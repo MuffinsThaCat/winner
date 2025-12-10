@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # Williams Executor - Sequential (your optimized version)
+  williams-sequential:
+    image: williams/executor:latest
+    container_name: williams-sequential
+    cpuset: "0-7"  # Pin to cores 0-7 for fair comparison
+    volumes:
+      - ./data:/data:ro
+      - ./stats_williams:/out
+    command: ["/data", "16"]
+    
+  # SupraBTM - Their official image (for comparison)
+  supra-btm:
+    image: rohitkapoor9312/ibtm-image:latest
+    container_name: supra-btm
+    cpuset: "0-7"  # Same cores for fair comparison
+    volumes:
+      - ./data_bdf:/data:ro
+      - ./stats_suprabtm:/out
+    command: ["--data-dir", "/data", "--output-dir", "/out", "--inmemory"]
+
+# Usage:
+# 1. Build Williams image first:
+#    docker-compose build williams-sequential
+#
+# 2. Run Williams:
+#    docker-compose run --rm williams-sequential
+#
+# 3. Run Supra (requires data_bdf dataset):
+#    docker-compose run --rm supra-btm
+#
+# 4. Compare results:
+#    cat stats_williams/results.txt
+#    cat stats_suprabtm/execution_time.txt

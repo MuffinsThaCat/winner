@@ -1,0 +1,9 @@
+target/
+*.log
+*.txt
+stats_*
+data_*/
+.git/
+.gitignore
+*.md
+!README.md
