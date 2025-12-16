@@ -5,8 +5,12 @@ edition = "2021"
 
 [features]
 default = []
-bench = []  # Disable verbose logging for benchmarking
-quiet = []  # Minimal output for maximum performance
+bench = []  # Pure benchmark mode - maximum TPS, minimal observability
+production = ["logging", "metrics", "resilience", "signatures"]  # Full production features
+logging = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
+metrics = ["dep:prometheus"]
+resilience = ["dep:backoff"]
+signatures = ["dep:secp256k1"]  # ECDSA signature verification
 
 [dependencies]
 revm = { version = "10.0", default-features = false, features = ["std", "secp256k1"] }
@@ -25,9 +29,29 @@ rustc-hash = "2.0"
 mimalloc = { version = "0.1", default-features = false }
 dashmap = "5.5"
 
+# Optional production dependencies (zero cost if not enabled)
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+tracing-appender = { version = "0.2", optional = true }
+prometheus = { version = "0.13", optional = true }
+backoff = { version = "0.4", optional = true }
+secp256k1 = { version = "0.28", features = ["recovery"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+
+[lib]
+name = "williams_hybrid_complete"
+path = "src/lib.rs"
+
 [[bin]]
 name = "williams-complete"
 path = "src/main.rs"
+
+[[bench]]
+name = "executor_bench"
+harness = false
 
 [profile.release]
 opt-level = 3              # Maximum optimization

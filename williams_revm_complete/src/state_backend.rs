@@ -24,10 +24,9 @@ impl RpcStateBackend {
         Self {
             rpc_url,
             block_number,
-            // Pre-allocate with estimated capacity (typical block: ~200 unique addresses)
-            cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(256, Default::default()))),
-            code_cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(64, Default::default()))),
-            storage_cache: Arc::new(RwLock::new(FxHashMap::with_capacity_and_hasher(512, Default::default()))),
+            cache: Arc::new(RwLock::new(FxHashMap::default())),
+            code_cache: Arc::new(RwLock::new(FxHashMap::default())),
+            storage_cache: Arc::new(RwLock::new(FxHashMap::default())),
             client: reqwest::blocking::Client::new(),
         }
     }
@@ -38,7 +37,7 @@ impl RpcStateBackend {
         use std::time::Instant;
         
         let start = Instant::now();
-        #[cfg(not(feature = "quiet"))]
+        #[cfg(not(feature = "bench"))]
         println!("⚡ PARALLEL bulk prefetch: {} addresses", addresses.len());
         
         // OPTIMIZATION: Dynamic chunk sizing based on thread count
@@ -48,7 +47,7 @@ impl RpcStateBackend {
         let chunk_size = (thread_count * 8).max(32).min(200); // Min 32, max 200
         let total_chunks = (addresses.len() + chunk_size - 1) / chunk_size;
         
-        #[cfg(not(feature = "quiet"))]
+        #[cfg(not(feature = "bench"))]
         println!("  Using dynamic chunk size: {} ({}x threads * 8)", chunk_size, thread_count);
         
         // Process chunks in parallel - each chunk fetches sequentially to reuse HTTP connection
@@ -57,6 +56,7 @@ impl RpcStateBackend {
             .enumerate()
             .flat_map(|(chunk_idx, chunk)| {
                 // Progress indicator every 5 chunks
+                #[cfg(not(feature = "bench"))]
                 if chunk_idx % 5 == 0 {
                     let progress = (chunk_idx * 100) / total_chunks.max(1);
                     print!("\rPrefetching: {}% ({}/{})", progress, chunk_idx, total_chunks);
@@ -79,7 +79,7 @@ impl RpcStateBackend {
         drop(cache);
         
         let elapsed = start.elapsed();
-        #[cfg(not(feature = "quiet"))]
+        #[cfg(not(feature = "bench"))]
         {
             let rate = addresses.len() as f64 / elapsed.as_secs_f64();
             println!("\r✓ Parallel prefetch complete: {:.2}ms ({:.0} addrs/sec, {}x parallel)", 
@@ -312,7 +312,7 @@ impl OfflineStateBackend {
             self.cache.insert(addr, Arc::new(info));
         }
         
-        #[cfg(not(feature = "quiet"))]
+        #[cfg(not(feature = "bench"))]
         {
             let elapsed = start.elapsed();
             if elapsed.as_micros() > 100 {

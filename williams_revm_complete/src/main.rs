@@ -16,6 +16,12 @@ mod state_backend;
 mod executor;
 mod parallel_executor;
 
+#[cfg(feature = "production")]
+mod evm_validation;
+
+#[cfg(test)]
+mod tests;
+
 use anyhow::{Result, Context};
 use std::fs;
 use std::path::PathBuf;
@@ -136,7 +142,7 @@ fn main() -> Result<()> {
     let total_receipts: usize = results.iter().map(|r| r.tx_receipts.len()).sum();
     let total_logs: usize = results.iter()
         .flat_map(|r| &r.tx_results)
-        .map(|t| t.logs.len())
+        .map(|tx| tx.logs.len())
         .sum();
     let total_state_changes: usize = results.iter()
         .flat_map(|r| &r.tx_results)

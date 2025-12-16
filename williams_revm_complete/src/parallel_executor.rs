@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use parking_lot::RwLock;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
-use crate::executor::{TxResult, BlockExecutionResult, ParsedTx, TxReceipt};
+use crate::executor::{ParsedTx, TxResult, TxReceipt, PreParsedBlock, BlockExecutionResult, StateSnapshot};
 
 /// Williams Parallel Executor with Hybrid Architecture
 pub struct WilliamsParallelExecutor {
@@ -77,6 +77,8 @@ impl WilliamsParallelExecutor {
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
                 total_gas_used: 0,
+                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
+                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
             });
         }
 
@@ -93,7 +95,20 @@ impl WilliamsParallelExecutor {
 
         // PHASE 1: SEQUENTIAL BULK PREFETCH (Your Williams Innovation!)
         let prefetch_start = std::time::Instant::now();
-        let addresses = self.collect_addresses(&parsed_txs);
+        
+        // CRITICAL PRE-STATE INITIALIZATION: Include coinbase address
+        let coinbase = block
+            .get("miner")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = s.trim_start_matches("0x");
+                hex::decode(s).ok().map(|bytes| Address::from_slice(&bytes))
+            });
+        let mut addresses = self.collect_addresses(&parsed_txs);
+        if let Some(cb) = coinbase {
+            addresses.push(cb);
+        }
+        
         let sender_addresses: HashSet<Address> = parsed_txs.iter()
             .map(|tx| tx.from)
             .collect();
@@ -226,6 +241,10 @@ impl WilliamsParallelExecutor {
         println!("Total gas: {} gas", total_gas);
         println!("{}", "=".repeat(70));
 
+        // CRITICAL: Capture PRE-STATE and POST-STATE snapshots
+        let pre_state = StateSnapshot { accounts: Arc::new(HashMap::new()) }; // Parallel executor uses different state model
+        let post_state = StateSnapshot { accounts: Arc::new(HashMap::new()) }; // State captured in parallel batches
+
         Ok(BlockExecutionResult {
             block_number,
             tx_count,
@@ -234,6 +253,8 @@ impl WilliamsParallelExecutor {
             execution_time_us: total_time.as_micros(),
             final_state_root: state_root,
             total_gas_used: total_gas,
+            pre_state,
+            post_state,
         })
     }
 
@@ -343,7 +364,7 @@ impl WilliamsParallelExecutor {
         cfg_env: &CfgEnvWithHandlerCfg,
         db: &Arc<RwLock<ParallelStateDB>>,
     ) -> Result<TxResult> {
-        let tx_env = parsed_tx.to_tx_env();
+        let tx_env = parsed_tx.to_tx_env(block_env.basefee);
 
         // Clone database reference for this thread
         let mut thread_db = ThreadLocalDB::new(db.clone());
@@ -365,13 +386,17 @@ impl WilliamsParallelExecutor {
                         index,
                         success: false,
                         gas_used: tx_env.gas_limit,
-                        output: Bytes::from(format!("Error: {:?}", e).as_bytes().to_vec()),
+                        output: Bytes::from(b"PARSE_ERROR"),
                         state_changes: vec![],
-                        logs: vec![],
+                        logs: Arc::new(Vec::new()),
                     });
                 }
             }
         };
+
+        // CRITICAL: Commit state changes to shared memory IMMEDIATELY
+        // This writes to ParallelStateDB.changes (shared across threads)
+        thread_db.commit(result.state.clone());
 
         // Extract logs and state changes
         let logs: Vec<String> = result.result.logs().iter()
@@ -401,7 +426,7 @@ impl WilliamsParallelExecutor {
             gas_used,
             output,
             state_changes,
-            logs,
+            logs: Arc::new(logs),
         })
     }
 

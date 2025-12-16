@@ -9,6 +9,7 @@ use revm::{
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
 
@@ -18,6 +19,7 @@ use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
 pub struct PreParsedBlock {
     pub block_number: u64,
     pub transactions: Vec<ParsedTx>,
+    pub coinbase: Option<Address>, // Block producer (miner/validator)
 }
 
 impl PreParsedBlock {
@@ -33,9 +35,19 @@ impl PreParsedBlock {
             .map(|tx| ParsedTx::from_json(tx))
             .collect::<Result<Vec<_>>>()?;
         
+        // CRITICAL: Parse coinbase address for pre-state initialization
+        let coinbase = block
+            .get("miner")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = s.trim_start_matches("0x");
+                Some(Address::from_slice(&hex::decode(s).ok()?))
+            });
+        
         Ok(PreParsedBlock {
             block_number,
             transactions,
+            coinbase,
         })
     }
 }
@@ -50,27 +62,43 @@ pub struct ParsedTx {
     pub from: Address,           // 20 bytes - always accessed
     pub gas_limit: u64,          // 8 bytes - always accessed
     pub to: Option<Address>,     // 24 bytes - usually accessed
-    pub data: Arc<Bytes>,        // 16 bytes - always accessed (total: 68 bytes, slightly over but sequential)
+    pub data: Arc<Bytes>,        // 16 bytes - always accessed
     
-    // COLD PATH: Second cache line - accessed less frequently
+    // WARM PATH: Transaction metadata
     pub value: U256,             // 32 bytes
-    pub gas_price: U256,         // 32 bytes
+    pub nonce: u64,              // 8 bytes - CRITICAL for replay protection
+    pub chain_id: Option<u64>,   // 8 bytes - EIP-155 replay protection
     pub hash: B256,              // 32 bytes
+    
+    // COLD PATH: Fee mechanics (EIP-1559)
+    pub gas_price: U256,         // 32 bytes - legacy transactions
+    pub max_fee_per_gas: Option<U256>,      // EIP-1559
+    pub max_priority_fee_per_gas: Option<U256>, // EIP-1559 tip
+    
+    // COLDEST: Signature & advanced features
+    pub tx_type: u8,             // 0=legacy, 1=EIP-2930, 2=EIP-1559
+    pub access_list: Vec<(Address, Vec<U256>)>, // EIP-2930/EIP-1559
+    pub v: u64,                  // Signature component
+    pub r: U256,                 // Signature component
+    pub s: U256,                 // Signature component
 }
 
 impl ParsedTx {
     /// Parse transaction from JSON once (avoids triple parsing)
+    /// Supports legacy, EIP-2930, and EIP-1559 transaction types
     pub fn from_json(tx: &Value) -> Result<Self> {
+        // Parse sender address
         let from = tx.get("from")
             .and_then(|v| v.as_str())
             .and_then(|s| parse_address(s).ok())
             .unwrap_or_default();
         
+        // Parse recipient (None for contract creation)
         let to = tx.get("to")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "null")
             .and_then(|s| parse_address(s).ok());
         
+        // Parse value transfer amount
         let value = tx.get("value")
             .and_then(|v| v.as_str())
             .and_then(|s| {
@@ -79,15 +107,17 @@ impl ParsedTx {
             })
             .unwrap_or(U256::ZERO);
         
+        // Parse transaction data/input
         let data = tx.get("input")
             .and_then(|v| v.as_str())
             .and_then(|s| {
-                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                let s = s.trim_start_matches("0x");
                 hex::decode(s).ok()
             })
             .map(|bytes| Arc::new(Bytes::from(bytes)))
             .unwrap_or_else(|| Arc::new(Bytes::default()));
         
+        // Parse gas limit
         let gas_limit = tx.get("gas")
             .and_then(|v| v.as_str())
             .and_then(|s| {
@@ -96,7 +126,106 @@ impl ParsedTx {
             })
             .unwrap_or(30_000_000);
         
-        let gas_price = tx.get("gasPrice")
+        // Parse nonce (CRITICAL for replay protection)
+        let nonce = tx.get("nonce")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                u64::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(0);
+        
+        // Parse chain ID (EIP-155 replay protection)
+        let chain_id = tx.get("chainId")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                u64::from_str_radix(s, 16).ok()
+            });
+        
+        // Determine transaction type
+        let tx_type = tx.get("type")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                u8::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(0); // Default to legacy
+        
+        // Parse gas price (legacy) or EIP-1559 fees
+        let (gas_price, max_fee_per_gas, max_priority_fee_per_gas) = if tx_type >= 2 {
+            // EIP-1559 transaction
+            let max_fee = tx.get("maxFeePerGas")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let s = if s.starts_with("0x") { &s[2..] } else { s };
+                    U256::from_str_radix(s, 16).ok()
+                });
+            
+            let max_priority = tx.get("maxPriorityFeePerGas")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let s = if s.starts_with("0x") { &s[2..] } else { s };
+                    U256::from_str_radix(s, 16).ok()
+                });
+            
+            (U256::ZERO, max_fee, max_priority)
+        } else {
+            // Legacy or EIP-2930 transaction
+            let gp = tx.get("gasPrice")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let s = if s.starts_with("0x") { &s[2..] } else { s };
+                    U256::from_str_radix(s, 16).ok()
+                })
+                .unwrap_or(U256::ZERO);
+            (gp, None, None)
+        };
+        
+        // Parse access list (EIP-2930 and EIP-1559)
+        let access_list = if tx_type >= 1 {
+            tx.get("accessList")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let addr = item.get("address")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| parse_address(s).ok())?;
+                            
+                            let keys = item.get("storageKeys")
+                                .and_then(|v| v.as_array())
+                                .map(|keys| {
+                                    keys.iter()
+                                        .filter_map(|k| {
+                                            k.as_str().and_then(|s| {
+                                                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                                                U256::from_str_radix(s, 16).ok()
+                                            })
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            
+                            Some((addr, keys))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        
+        // Parse signature components (v, r, s)
+        let v = tx.get("v")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = if s.starts_with("0x") { &s[2..] } else { s };
+                u64::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(0);
+        
+        let r = tx.get("r")
             .and_then(|v| v.as_str())
             .and_then(|s| {
                 let s = if s.starts_with("0x") { &s[2..] } else { s };
@@ -104,40 +233,94 @@ impl ParsedTx {
             })
             .unwrap_or(U256::ZERO);
         
-        let hash = tx.get("hash")
+        let s = tx.get("s")
             .and_then(|v| v.as_str())
             .and_then(|s| {
                 let s = if s.starts_with("0x") { &s[2..] } else { s };
+                U256::from_str_radix(s, 16).ok()
+            })
+            .unwrap_or(U256::ZERO);
+        
+        // Parse transaction hash
+        let hash = tx.get("hash")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let s = s.trim_start_matches("0x");
                 hex::decode(s).ok()
             })
-            .and_then(|bytes| if bytes.len() == 32 { Some(B256::from_slice(&bytes)) } else { None })
-            .unwrap_or_default();
-        
+            .and_then(|bytes| {
+                if bytes.len() == 32 {
+                    Some(B256::from_slice(&bytes))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(B256::ZERO);
+
         Ok(ParsedTx {
             from,
             to,
             value,
             data,
             gas_limit,
-            gas_price,
+            nonce,
+            chain_id,
             hash,
+            gas_price,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            tx_type,
+            access_list,
+            v,
+            r,
+            s,
         })
     }
     
     /// Convert to TxEnv for EVM execution (zero-copy via Arc)
     #[inline(always)]  // Hot path: called for every transaction
-    pub fn to_tx_env(&self) -> TxEnv {
+    pub fn to_tx_env(&self, block_base_fee: U256) -> TxEnv {
+        // Calculate effective gas price and priority fee for EIP-1559
+        let (gas_price, gas_priority_fee) = match self.tx_type {
+            // Legacy (type 0) or EIP-2930 (type 1)
+            0 | 1 => (self.gas_price, None),
+            
+            // EIP-1559 (type 2)
+            2 => {
+                let max_fee = self.max_fee_per_gas.unwrap_or(U256::ZERO);
+                let max_priority = self.max_priority_fee_per_gas.unwrap_or(U256::ZERO);
+                
+                // Effective priority fee = min(max_priority_fee, max_fee - base_fee)
+                let priority = max_priority.min(max_fee.saturating_sub(block_base_fee));
+                // Effective gas price = base_fee + effective_priority_fee
+                let eff_price = block_base_fee + priority;
+                
+                (eff_price, Some(priority))
+            }
+            
+            // Unknown type: use gas_price
+            _ => (self.gas_price, None),
+        };
+        
+        // Convert access list to REVM format
+        let access_list = self.access_list.iter()
+            .map(|(addr, keys)| {
+                let storage_keys: Vec<U256> = keys.clone();
+                (*addr, storage_keys)
+            })
+            .collect();
+        
         TxEnv {
             caller: self.from,
             transact_to: self.to.map(TransactTo::Call).unwrap_or(TransactTo::Create),
             value: self.value,
-            data: Bytes::clone(&self.data), // OPTIMIZATION: Bytes has internal Arc, this is cheap
+            data: Bytes::clone(&self.data), // OPTIMIZATION: Bytes has internal Arc
             gas_limit: self.gas_limit,
-            gas_price: self.gas_price,
-            nonce: Some(0),
-            chain_id: Some(1),
-            access_list: vec![],
-            gas_priority_fee: None,
+            gas_price,
+            nonce: Some(self.nonce),
+            chain_id: self.chain_id,
+            access_list,
+            gas_priority_fee,
             blob_hashes: vec![],
             max_fee_per_blob_gas: None,
         }
@@ -152,7 +335,7 @@ pub struct TxResult {
     pub gas_used: u64,
     pub output: Bytes,
     pub state_changes: Vec<(Address, AccountInfo)>,
-    pub logs: Vec<String>,
+    pub logs: Arc<Vec<String>>,  // OPTIMIZATION: Arc to avoid cloning log strings
 }
 
 /// Transaction receipt (Ethereum-compatible)
@@ -169,6 +352,13 @@ pub struct TxReceipt {
     pub state_changes_count: usize,
 }
 
+/// State snapshot (pre-state or post-state)
+/// OPTIMIZATION: Uses Arc for zero-copy sharing - snapshots share the same data
+#[derive(Debug, Clone)]
+pub struct StateSnapshot {
+    pub accounts: Arc<HashMap<Address, AccountInfo>>,
+}
+
 /// Block execution result
 #[derive(Debug, Clone)]
 pub struct BlockExecutionResult {
@@ -179,6 +369,8 @@ pub struct BlockExecutionResult {
     pub execution_time_us: u128,
     pub final_state_root: B256,
     pub total_gas_used: u64,
+    pub pre_state: StateSnapshot,   // State BEFORE execution
+    pub post_state: StateSnapshot,  // State AFTER execution
 }
 
 /// Williams Hybrid Executor
@@ -213,7 +405,6 @@ impl WilliamsExecutor {
         &self,
         preparsed: &PreParsedBlock,
     ) -> Result<BlockExecutionResult> {
-        let total_start = std::time::Instant::now();
         let block_number = preparsed.block_number;
         let parsed_txs = &preparsed.transactions;
         let tx_count = parsed_txs.len();
@@ -227,16 +418,26 @@ impl WilliamsExecutor {
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
                 total_gas_used: 0,
+                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
+                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
             });
         }
 
-        println!("\n{}", "=".repeat(70));
-        println!("BLOCK {} - {} transactions", block_number, tx_count);
-        println!("{}", "=".repeat(70));
+        #[cfg(not(feature = "bench"))]
+        {
+            println!("\n{}", "=".repeat(70));
+            println!("BLOCK {} - {} transactions", block_number, tx_count);
+            println!("{}", "=".repeat(70));
+        }
+
+        let total_start = std::time::Instant::now();
 
         // PHASE 1: BULK PREFETCH addresses (using pre-parsed data - ZERO JSON overhead!)
         let addr_collect_start = std::time::Instant::now();
-        let addresses = self.collect_addresses_from_parsed(&parsed_txs);
+        
+        // CRITICAL PRE-STATE INITIALIZATION: Include coinbase address
+        let coinbase = preparsed.coinbase; // Coinbase receives block rewards
+        let addresses = self.collect_addresses_with_coinbase(&parsed_txs, coinbase);
         let addr_collect_time = addr_collect_start.elapsed();
         
         // Collect sender addresses - these MUST be EOAs (no code)
@@ -252,15 +453,11 @@ impl WilliamsExecutor {
                     block_number
                 );
                 rpc.bulk_prefetch(&addresses)?;
-                println!("  ⚡ RPC prefetch: {:.3}ms ({} accounts, parallel)", 
-                    prefetch_start.elapsed().as_secs_f64() * 1000.0, addresses.len());
                 StateBackend::Rpc(rpc)
             },
             false => {
                 let offline = OfflineStateBackend::new();
                 offline.bulk_prefetch(&addresses)?;
-                println!("  ⚡ Offline prefetch: {:.3}ms ({} accounts, parallel)", 
-                    prefetch_start.elapsed().as_secs_f64() * 1000.0, addresses.len());
                 StateBackend::Offline(offline)
             },
         };
@@ -277,7 +474,10 @@ impl WilliamsExecutor {
         let mut db = StateDB::new(state_backend.clone());
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
-        db.set_senders(sender_addresses.clone());
+        db.set_senders(sender_addresses);
+
+        // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
+        let pre_state = db.export_state_snapshot(&addresses);
 
         // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
@@ -308,6 +508,10 @@ impl WilliamsExecutor {
         // Drop EVM to release mutable borrow of db
         drop(evm);
         
+        // CRITICAL: Capture POST-STATE snapshot (COMPLETE - includes new contracts)
+        // This captures ALL addresses touched during execution, including newly deployed contracts
+        let post_state = db.export_complete_state_snapshot();
+        
         // PHASE 3: ORDERED COMMIT (deterministic final state)
         let commit_start = std::time::Instant::now();
         
@@ -319,7 +523,6 @@ impl WilliamsExecutor {
         
         // Calculate total gas used
         let total_gas: u64 = tx_results.iter().map(|r| r.gas_used).sum();
-        println!("  Total gas used: {} gas", total_gas);
 
         // Generate receipts in parallel iterator (faster than loop)
         let tx_receipts: Vec<TxReceipt> = (0..tx_count)
@@ -381,6 +584,8 @@ impl WilliamsExecutor {
             execution_time_us: execution_time,
             final_state_root,
             total_gas_used: total_gas,
+            pre_state,
+            post_state,
         })
     }
 
@@ -404,6 +609,7 @@ impl WilliamsExecutor {
         let tx_count = txs.len();
         let parse_time = parse_start.elapsed();
         if tx_count == 0 {
+            println!("⚠ Block {} has no transactions - skipping", block_number);
             return Ok(BlockExecutionResult {
                 block_number,
                 tx_count: 0,
@@ -412,6 +618,8 @@ impl WilliamsExecutor {
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
                 total_gas_used: 0,
+                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
+                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
             });
         }
 
@@ -469,7 +677,10 @@ impl WilliamsExecutor {
         let mut db = StateDB::new(state_backend.clone());
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
-        db.set_senders(sender_addresses.clone());
+        db.set_senders(sender_addresses);
+
+        // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
+        let pre_state = db.export_state_snapshot(&addresses);
 
         // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
@@ -511,7 +722,6 @@ impl WilliamsExecutor {
         
         // Calculate total gas used
         let total_gas: u64 = tx_results.iter().map(|r| r.gas_used).sum();
-        println!("  Total gas used: {} gas", total_gas);
 
         // Generate receipts in parallel iterator (faster than loop)
         let tx_receipts: Vec<TxReceipt> = (0..tx_count)
@@ -564,6 +774,10 @@ impl WilliamsExecutor {
 
         let execution_time = total_time.as_micros();
 
+        // CRITICAL: Capture POST-STATE snapshot (COMPLETE - includes new contracts)
+        // This captures ALL addresses touched during execution, including newly deployed contracts
+        let post_state = db.export_complete_state_snapshot();
+
         Ok(BlockExecutionResult {
             block_number,
             tx_count,
@@ -572,12 +786,15 @@ impl WilliamsExecutor {
             execution_time_us: execution_time,
             final_state_root,
             total_gas_used: total_gas,
+            pre_state,
+            post_state,
         })
     }
 
     /// Collect all unique addresses from parsed transactions (OPTIMIZED - no JSON parsing, fast hashing)
+    /// INCLUDES: Transaction senders, receivers, AND coinbase (block producer)
     #[inline]  // OPTIMIZATION: Inline for better performance
-    fn collect_addresses_from_parsed(&self, parsed_txs: &[ParsedTx]) -> Vec<Address> {
+    pub fn collect_addresses_from_parsed(&self, parsed_txs: &[ParsedTx]) -> Vec<Address> {
         use rustc_hash::FxHashSet;
         
         // OPTIMIZATION: Use FxHashSet (faster than std HashSet) + single-pass collection
@@ -593,6 +810,19 @@ impl WilliamsExecutor {
 
         addresses.into_iter().collect()
     }
+    
+    /// Collect addresses with coinbase (for complete pre-state initialization)
+    #[inline]
+    pub fn collect_addresses_with_coinbase(&self, parsed_txs: &[ParsedTx], coinbase: Option<Address>) -> Vec<Address> {
+        let mut addresses = self.collect_addresses_from_parsed(parsed_txs);
+        
+        // CRITICAL: Add coinbase address for block reward (pre-state requirement)
+        if let Some(cb) = coinbase {
+            addresses.push(cb);
+        }
+        
+        addresses
+    }
 
     /// Execute a single transaction with REUSED EVM instance (10/10 optimization)
     #[inline(always)]  // OPTIMIZATION: Inline hot path - called for every transaction
@@ -602,9 +832,104 @@ impl WilliamsExecutor {
         parsed_tx: &ParsedTx,
         evm: &mut Evm<'a, (), &'a mut StateDB>,
     ) -> Result<TxResult> {
+        let block_base_fee = evm.block().basefee;
+        let coinbase = evm.block().coinbase;
+        
+        // PRODUCTION MODE: Pre-execution validation
+        #[cfg(feature = "production")]
+        {
+            use crate::evm_validation::*;
+            
+            // 1. Verify signature (if signatures feature enabled)
+            #[cfg(feature = "signatures")]
+            {
+                if !verify_signature(
+                    parsed_tx.from,
+                    parsed_tx.hash,
+                    parsed_tx.v,
+                    parsed_tx.r,
+                    parsed_tx.s,
+                    parsed_tx.chain_id,
+                )? {
+                    return Ok(TxResult {
+                        index,
+                        success: false,
+                        gas_used: 0,
+                        output: Bytes::from(b"INVALID_SIGNATURE"),
+                        state_changes: vec![],
+                        logs: Arc::new(Vec::new()),
+                    });
+                }
+            }
+            
+            // 2. Get sender account and validate nonce
+            let sender_account = evm.context.evm.db.basic(parsed_tx.from)?.unwrap_or_default();
+            
+            if let Err(e) = validate_nonce(parsed_tx.nonce, sender_account.nonce) {
+                #[cfg(not(feature = "bench"))]
+                eprintln!("Nonce validation failed for tx {}: {}", index, e);
+                
+                let msg = format!("INVALID_NONCE: {}", e);
+                return Ok(TxResult {
+                    index,
+                    success: false,
+                    gas_used: 0,
+                    output: Bytes::from(msg.into_bytes()),
+                    state_changes: vec![],
+                    logs: Arc::new(Vec::new()),
+                });
+            }
+            
+            // 3. Calculate effective gas price
+            let effective_gas_price = calculate_effective_gas_price(
+                parsed_tx.tx_type,
+                parsed_tx.gas_price,
+                parsed_tx.max_fee_per_gas,
+                parsed_tx.max_priority_fee_per_gas,
+                block_base_fee,
+            );
+            
+            // 4. Validate balance (sender must have enough for gas + value)
+            if let Err(e) = validate_balance(
+                sender_account.balance,
+                parsed_tx.gas_limit,
+                effective_gas_price,
+                parsed_tx.value,
+            ) {
+                #[cfg(not(feature = "bench"))]
+                eprintln!("Balance validation failed for tx {}: {}", index, e);
+                
+                let msg = format!("INSUFFICIENT_BALANCE: {}", e);
+                return Ok(TxResult {
+                    index,
+                    success: false,
+                    gas_used: 0,
+                    output: Bytes::from(msg.into_bytes()),
+                    state_changes: vec![],
+                    logs: Arc::new(Vec::new()),
+                });
+            }
+            
+            // 5. Validate chain ID (EIP-155)
+            if let Err(e) = validate_chain_id(parsed_tx.chain_id, 1) {
+                #[cfg(not(feature = "bench"))]
+                eprintln!("Chain ID validation failed for tx {}: {}", index, e);
+                
+                let msg = format!("INVALID_CHAIN_ID: {}", e);
+                return Ok(TxResult {
+                    index,
+                    success: false,
+                    gas_used: 0,
+                    output: Bytes::from(msg.into_bytes()),
+                    state_changes: vec![],
+                    logs: Arc::new(Vec::new()),
+                });
+            }
+        }
+        
         // OPTIMIZATION: Update only tx_env (block_env and cfg_env are already set)
         // Note: Clone is needed as TxEnv doesn't implement Copy
-        *evm.tx_mut() = parsed_tx.to_tx_env();
+        *evm.tx_mut() = parsed_tx.to_tx_env(block_base_fee);
 
         // Execute transaction (reusing EVM instance - no allocation!)
         let result = match evm.transact() {
@@ -620,15 +945,39 @@ impl WilliamsExecutor {
                     gas_used: parsed_tx.gas_limit,
                     output: Bytes::from(b"EVM_ERROR"),  // Static error, no allocation
                     state_changes: vec![],
-                    logs: vec![],
+                    logs: Arc::new(Vec::new()),
                 });
             }
         };
 
-        // State changes are automatically applied to db during transact()
-        // result.state contains the diff, but db already has the changes
+        // CRITICAL: Commit state changes to database IMMEDIATELY
+        // This ensures next transaction sees state changes from this transaction
+        // Sequential state dependency: Tx[n+1] must see state from Tx[n]
+        evm.context.evm.db.commit(result.state.clone());
 
-        // Extract result WITHOUT accessing logs or state (optimization)
+        // OPTIMIZATION 1: Extract state changes efficiently (avoid double clone)
+        // Pre-allocate with exact capacity to avoid reallocations
+        let state_changes: Vec<(Address, AccountInfo)> = {
+            let mut changes = Vec::with_capacity(result.state.len());
+            for (addr, account) in result.state {
+                changes.push((addr, account.info));
+            }
+            changes
+        };
+        
+        // OPTIMIZATION 2: Extract logs with Arc (defer string formatting cost)
+        let logs: Arc<Vec<String>> = match &result.result {
+            ExecutionResult::Success { logs, .. } if !logs.is_empty() => {
+                let mut log_strs = Vec::with_capacity(logs.len());
+                for log in logs {
+                    log_strs.push(format!("0x{:x}", log.address));
+                }
+                Arc::new(log_strs)
+            },
+            _ => Arc::new(Vec::new()),
+        };
+
+        // Extract result
         let (success, gas_used, output) = match result.result {
             ExecutionResult::Success { gas_used, output, .. } => {
                 (true, gas_used, output.into_data())
@@ -641,14 +990,60 @@ impl WilliamsExecutor {
                 (false, gas_used, Bytes::from(b"EVM_HALT"))
             }
         };
+        
+        // PRODUCTION MODE: Post-execution economics
+        #[cfg(feature = "production")]
+        {
+            use crate::evm_validation::*;
+            
+            // Calculate effective gas price
+            let effective_gas_price = calculate_effective_gas_price(
+                parsed_tx.tx_type,
+                parsed_tx.gas_price,
+                parsed_tx.max_fee_per_gas,
+                parsed_tx.max_priority_fee_per_gas,
+                block_base_fee,
+            );
+            
+            // Calculate gas payment distribution (burned vs miner)
+            let (burn_amount, miner_amount) = calculate_gas_payment(
+                parsed_tx.tx_type,
+                gas_used,
+                effective_gas_price,
+                block_base_fee,
+            );
+            
+            // Deduct total gas cost from sender
+            let total_gas_cost = U256::from(gas_used) * effective_gas_price;
+            if let Err(e) = evm.context.evm.db.deduct_balance(parsed_tx.from, total_gas_cost) {
+                #[cfg(not(feature = "bench"))]
+                eprintln!("Failed to deduct gas from sender for tx {}: {}", index, e);
+            }
+            
+            // Pay miner (priority fee + any legacy gas fees)
+            if miner_amount > U256::ZERO {
+                if let Err(e) = evm.context.evm.db.add_balance(coinbase, miner_amount) {
+                    #[cfg(not(feature = "bench"))]
+                    eprintln!("Failed to pay miner for tx {}: {}", index, e);
+                }
+            }
+            
+            // Note: burn_amount is destroyed (not sent anywhere) - EIP-1559 base fee burn
+            
+            // Increment sender nonce (prevents replay attacks)
+            if let Err(e) = evm.context.evm.db.increment_nonce(parsed_tx.from) {
+                #[cfg(not(feature = "bench"))]
+                eprintln!("Failed to increment nonce for tx {}: {}", index, e);
+            }
+        }
 
         Ok(TxResult {
             index,
             success,
             gas_used,
             output,
-            state_changes: vec![],  // Empty - state already in DB
-            logs: vec![],           // Empty - defer formatting
+            state_changes,  // Actual state changes from this transaction
+            logs,           // Actual logs emitted from this transaction
         })
     }
 
@@ -689,6 +1084,24 @@ impl WilliamsExecutor {
                 block_env.coinbase = addr;
             }
         }
+        
+        // Parse difficulty (pre-merge) or prevrandao (post-merge)
+        if let Some(difficulty) = block.get("difficulty").and_then(|v| v.as_str()) {
+            let diff_str = if difficulty.starts_with("0x") { &difficulty[2..] } else { difficulty };
+            if let Ok(diff) = U256::from_str_radix(diff_str, 16) {
+                block_env.difficulty = diff;
+            }
+        }
+        
+        // Post-merge: prevrandao replaces difficulty
+        if let Some(prevrandao) = block.get("mixHash").or_else(|| block.get("prevRandao")).and_then(|v| v.as_str()) {
+            let pr_str = if prevrandao.starts_with("0x") { &prevrandao[2..] } else { prevrandao };
+            if let Ok(bytes) = hex::decode(pr_str) {
+                if bytes.len() == 32 {
+                    block_env.prevrandao = Some(B256::from_slice(&bytes));
+                }
+            }
+        }
 
         Ok(block_env)
     }
@@ -706,22 +1119,92 @@ enum StateBackend {
 #[repr(align(64))]
 pub struct StateDB {
     backend: StateBackend,
-    changes: HashMap<Address, AccountInfo>,
+    changes: FxHashMap<Address, AccountInfo>,
     sender_addresses: HashSet<Address>, // Track senders - must be EOAs
+    block_hashes: HashMap<u64, B256>, // Last 256 block hashes for BLOCKHASH opcode
 }
 
 impl StateDB {
     fn new(backend: StateBackend) -> Self {
         Self {
             backend,
-            changes: HashMap::with_capacity(1000),
+            changes: FxHashMap::default(),
             sender_addresses: HashSet::with_capacity(500),
+            block_hashes: HashMap::with_capacity(256),
         }
     }
 
     /// Mark addresses as transaction senders (must be EOAs)
     fn set_senders(&mut self, senders: HashSet<Address>) {
         self.sender_addresses = senders;
+    }
+    
+    /// Add block hash to history (keeps last 256)
+    fn add_block_hash(&mut self, block_number: u64, block_hash: B256) {
+        self.block_hashes.insert(block_number, block_hash);
+        
+        // Keep only last 256 blocks
+        if self.block_hashes.len() > 256 {
+            if let Some(min_block) = self.block_hashes.keys().min().copied() {
+                self.block_hashes.remove(&min_block);
+            }
+        }
+    }
+    
+    /// Deduct balance from an account (for gas payment and value transfer)
+    fn deduct_balance(&mut self, address: Address, amount: U256) -> Result<()> {
+        let mut info = self.basic(address)?.unwrap_or_default();
+        
+        if info.balance < amount {
+            bail!("Insufficient balance: have {}, need {}", info.balance, amount);
+        }
+        
+        info.balance -= amount;
+        self.changes.insert(address, info);
+        Ok(())
+    }
+    
+    /// Add balance to an account (for miner rewards)
+    fn add_balance(&mut self, address: Address, amount: U256) -> Result<()> {
+        let mut info = self.basic(address)?.unwrap_or_default();
+        info.balance += amount;
+        self.changes.insert(address, info);
+        Ok(())
+    }
+    
+    /// Increment account nonce
+    fn increment_nonce(&mut self, address: Address) -> Result<()> {
+        let mut info = self.basic(address)?.unwrap_or_default();
+        info.nonce += 1;
+        self.changes.insert(address, info);
+        Ok(())
+    }
+
+    /// Export complete state snapshot (includes backend state + local changes)
+    /// OPTIMIZATION: Returns Arc-wrapped HashMap for zero-copy sharing
+    fn export_state_snapshot(&mut self, addresses: &[Address]) -> StateSnapshot {
+        let mut accounts = HashMap::with_capacity(addresses.len());
+        
+        for &address in addresses {
+            // Get account info (checks local changes first, then backend)
+            if let Ok(Some(info)) = self.basic(address) {
+                accounts.insert(address, info);
+            }
+        }
+        
+        // Wrap in Arc for zero-copy cloning
+        StateSnapshot { accounts: Arc::new(accounts) }
+    }
+
+    /// Export COMPLETE state snapshot including ALL touched addresses (pre-state + newly created)
+    /// This captures contract deployments and any addresses touched during execution
+    fn export_complete_state_snapshot(&self) -> StateSnapshot {
+        // Convert FxHashMap to standard HashMap to match StateSnapshot type
+        let mut accounts = HashMap::with_capacity(self.changes.len());
+        for (&address, info) in &self.changes {
+            accounts.insert(address, info.clone());
+        }
+        StateSnapshot { accounts: Arc::new(accounts) }
     }
 
     /// Compute state root from all account changes
@@ -760,9 +1243,6 @@ impl Database for StateDB {
                 let mut eoa_info = info.clone();
                 eoa_info.code_hash = KECCAK_EMPTY;
                 eoa_info.code = None;
-                if info.code_hash != KECCAK_EMPTY {
-                    eprintln!("[DEBUG] Forcing sender {:?} to be EOA (had code_hash: {:?})", address, info.code_hash);
-                }
                 return Ok(Some(eoa_info));
             }
             return Ok(Some(info.clone()));
@@ -776,9 +1256,6 @@ impl Database for StateDB {
 
         // CRITICAL: Force sender addresses to NEVER have code (EIP-3607)
         if is_sender {
-            if info.code_hash != KECCAK_EMPTY {
-                eprintln!("[DEBUG] Backend gave sender {:?} code_hash {:?}, forcing to KECCAK_EMPTY", address, info.code_hash);
-            }
             info.code_hash = KECCAK_EMPTY;
             info.code = None;
         }
@@ -811,15 +1288,25 @@ impl Database for StateDB {
         }
     }
 
-    fn block_hash(&mut self, _number: U256) -> Result<B256, Self::Error> {
+    fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
+        // Try to get from our block hash history
+        if let Some(num) = number.try_into().ok().and_then(|n: u64| Some(n)) {
+            if let Some(hash) = self.block_hashes.get(&num) {
+                return Ok(*hash);
+            }
+        }
+        // Return zero hash if not found (block too old or not available)
         Ok(B256::ZERO)
     }
 }
 
+// CRITICAL: Implement DatabaseCommit to persist state changes between transactions
 impl DatabaseCommit for StateDB {
     fn commit(&mut self, changes: HashMap<Address, revm::primitives::Account>) {
-        for (addr, account) in changes {
-            self.changes.insert(addr, account.info);
+        // Apply state changes to our internal cache
+        // This ensures Tx[n+1] sees state changes from Tx[n]
+        for (address, account) in changes {
+            self.changes.insert(address, account.info);
         }
     }
 }
