@@ -1,10 +1,11 @@
 // State Backend - Loads real state from RPC or local cache
 // This replaces EmptyDB with actual account data
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo, KECCAK_EMPTY};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
 use serde_json::{json, Value};
 use dashmap::DashMap;
 
@@ -240,6 +241,7 @@ impl RpcStateBackend {
 
 /// Offline state backend for testing without RPC
 /// Uses reasonable defaults for accounts
+/// Now with Williams + φ compression support
 #[derive(Clone)]
 pub struct OfflineStateBackend {
     // OPTIMIZATION: Use DashMap + Arc<AccountInfo> for lock-free access with cheap clones
@@ -248,6 +250,9 @@ pub struct OfflineStateBackend {
     bytecode: Arc<DashMap<B256, Bytecode>>,
     eoa_addresses: Arc<DashMap<Address, ()>>, // Addresses that MUST be EOAs
     default_balance: U256,
+    
+    // NEW: Williams + φ compression for state snapshots
+    compression_enabled: bool,
 }
 
 impl OfflineStateBackend {
@@ -263,7 +268,25 @@ impl OfflineStateBackend {
             bytecode: Arc::new(DashMap::with_capacity(64)),
             eoa_addresses: Arc::new(DashMap::with_capacity(128)),
             default_balance,
+            compression_enabled: false, // Disabled by default for compatibility
         }
+    }
+    
+    /// Create new backend with Williams compression enabled
+    pub fn new_with_compression() -> Self {
+        let mut backend = Self::new();
+        backend.compression_enabled = true;
+        backend
+    }
+    
+    /// Enable/disable Williams + φ compression
+    pub fn set_compression(&mut self, enabled: bool) {
+        self.compression_enabled = enabled;
+    }
+    
+    /// Check if compression is enabled
+    pub fn is_compressed(&self) -> bool {
+        self.compression_enabled
     }
 
     /// Mark an address as EOA (must not have code)
@@ -373,5 +396,18 @@ impl OfflineStateBackend {
     pub fn update_account(&self, address: Address, info: AccountInfo) {
         // OPTIMIZATION: Lock-free insert with DashMap + Arc
         self.cache.insert(address, Arc::new(info));
+    }
+    
+    /// Export all cached accounts for compression
+    pub fn export_accounts(&self) -> HashMap<Address, AccountInfo> {
+        self.cache
+            .iter()
+            .map(|entry| (*entry.key(), (**entry.value()).clone()))
+            .collect()
+    }
+    
+    /// Get cache size for compression stats
+    pub fn cache_size(&self) -> usize {
+        self.cache.len()
     }
 }
