@@ -470,8 +470,9 @@ impl WilliamsExecutor {
             ..Default::default()
         };
         
-        // Create shared database with prefetched state
-        let mut db = StateDB::new(state_backend.clone());
+        // OPTIMIZATION: Create database with pre-allocated capacity based on tx count
+        // Reduces allocations during hot path execution
+        let mut db = StateDB::with_capacity(state_backend.clone(), tx_count);
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
         db.set_senders(sender_addresses);
@@ -673,8 +674,9 @@ impl WilliamsExecutor {
         let setup_start = std::time::Instant::now();
         let block_env = self.parse_block_env(block)?;
         
-        // Create shared database with prefetched state
-        let mut db = StateDB::new(state_backend.clone());
+        // OPTIMIZATION: Create database with pre-allocated capacity based on tx count
+        // Reduces allocations during hot path execution
+        let mut db = StateDB::with_capacity(state_backend.clone(), tx_count);
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
         db.set_senders(sender_addresses);
@@ -1116,22 +1118,41 @@ enum StateBackend {
 
 /// State database wrapping the backend
 /// Cache-line aligned for optimal CPU cache performance (64-byte alignment)
+/// OPTIMIZATION: Pre-allocated memory pools reduce allocation overhead
 #[repr(align(64))]
 pub struct StateDB {
     backend: StateBackend,
     changes: FxHashMap<Address, AccountInfo>,
     sender_addresses: HashSet<Address>, // Track senders - must be EOAs
     block_hashes: HashMap<u64, B256>, // Last 256 block hashes for BLOCKHASH opcode
+    // Memory pool: Pre-allocated capacity for hot path
+    tx_capacity: usize,  // Expected tx count per block
 }
 
 impl StateDB {
     fn new(backend: StateBackend) -> Self {
+        Self::with_capacity(backend, 200)  // Default: 200 tx capacity
+    }
+    
+    /// OPTIMIZATION: Create StateDB with pre-allocated capacity
+    /// Reduces allocations during hot path execution
+    fn with_capacity(backend: StateBackend, tx_count: usize) -> Self {
+        let account_capacity = tx_count * 3;  // Estimate: 3 accounts per tx (from, to, contracts)
+        
         Self {
             backend,
-            changes: FxHashMap::default(),
-            sender_addresses: HashSet::with_capacity(500),
+            changes: FxHashMap::with_capacity_and_hasher(account_capacity, Default::default()),
+            sender_addresses: HashSet::with_capacity(tx_count),
             block_hashes: HashMap::with_capacity(256),
+            tx_capacity: tx_count,
         }
+    }
+    
+    /// OPTIMIZATION: Reset for reuse (clears but keeps allocation)
+    fn reset(&mut self) {
+        self.changes.clear();
+        self.sender_addresses.clear();
+        // Keep block_hashes for BLOCKHASH opcode
     }
 
     /// Mark addresses as transaction senders (must be EOAs)
