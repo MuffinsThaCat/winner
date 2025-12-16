@@ -44,7 +44,7 @@ EOF
 
 # Create temporary data directory
 mkdir -p /tmp/test_data/blocks
-cp /tmp/test_block.json /tmp/test_data/blocks/
+cp /tmp/test_block.json /tmp/test_data/blocks/bdf-0000001.json
 
 echo "========================================="
 echo "Testing 3 Conflicting Transactions"
