@@ -63,6 +63,9 @@ fn main() -> Result<()> {
     // Check for --parallel flag
     let use_parallel = args.contains(&"--parallel".to_string());
     
+    // Check for --preload-state flag (default: true for benchmark performance)
+    let preload_state = !args.contains(&"--no-preload".to_string());
+    
     let use_rpc = args.iter().any(|a| a == "--rpc");
     let rpc_url = if use_rpc {
         args.iter()
@@ -78,6 +81,7 @@ fn main() -> Result<()> {
     println!("  Thread count:   {}", thread_count);
     println!("  Execution mode: {}", if use_parallel { "PARALLEL (Sequential+Parallel Hybrid)" } else { "Sequential" });
     println!("  State backend:  {}", if use_rpc { "RPC" } else { "Offline (default balances)" });
+    println!("  State loading:  {}", if preload_state { "Pre-loaded (optimized)" } else { "On-demand (realistic)" });
     if let Some(ref url) = rpc_url {
         println!("  RPC URL:        {}", url);
     }
@@ -127,7 +131,7 @@ fn main() -> Result<()> {
     let results = if use_parallel {
         execute_parallel(&loaded_blocks, thread_count, rpc_url)?
     } else {
-        execute_sequential(&loaded_blocks, thread_count, rpc_url, &PathBuf::from(&data_dir))?
+        execute_sequential(&loaded_blocks, thread_count, rpc_url, &PathBuf::from(&data_dir), preload_state)?
     };
 
     let total_time = results.iter()
@@ -223,6 +227,7 @@ fn execute_sequential(
     thread_count: usize,
     rpc_url: Option<String>,
     data_dir: &Path,
+    preload_state: bool,
 ) -> Result<Vec<BlockExecutionResult>> {
     let executor = if let Some(url) = rpc_url {
         WilliamsExecutor::with_rpc(thread_count, url)
@@ -235,9 +240,11 @@ fn execute_sequential(
     let parse_start = std::time::Instant::now();
     
     // OPTIMIZATION: Pre-load ALL pre_state files into memory (one-time I/O cost)
-    println!("  📦 Pre-loading pre_state files into memory...");
-    let pre_state_dir = data_dir.join("pre_state");
     let mut pre_state_cache: HashMap<u64, Arc<serde_json::Value>> = HashMap::new();
+    
+    if preload_state {
+        println!("  📦 Pre-loading pre_state files into memory (optimized mode)...");
+        let pre_state_dir = data_dir.join("pre_state");
     
     if pre_state_dir.exists() {
         let pre_state_files: Vec<_> = std::fs::read_dir(&pre_state_dir)
@@ -268,7 +275,10 @@ fn execute_sequential(
             pre_state_cache.insert(block_num, json);
         }
         
-        println!("  ✓ Loaded {} pre_state files into memory", pre_state_cache.len());
+            println!("  ✓ Loaded {} pre_state files into memory", pre_state_cache.len());
+        }
+    } else {
+        println!("  📂 Loading pre_state files on-demand (realistic mode)...");
     }
     
     let preparsed_blocks: Vec<(PathBuf, PreParsedBlock)> = loaded_blocks
@@ -292,11 +302,30 @@ fn execute_sequential(
     for (idx, (block_path, preparsed)) in preparsed_blocks.iter().enumerate() {
         println!("[{}/{}] Processing: {:?}", idx + 1, preparsed_blocks.len(), block_path.file_name());
         
-        // Get pre-loaded pre_state from cache (zero I/O overhead!)
-        let pre_state_json = pre_state_cache.get(&preparsed.block_number);
+        // Get pre-state: either from cache (fast) or will load from disk (realistic)
+        let pre_state_json = if preload_state {
+            pre_state_cache.get(&preparsed.block_number)
+        } else {
+            None
+        };
         
-        // Use the FAST PATH - zero JSON parsing overhead, zero I/O overhead!
-        match executor.execute_preparsed_block_with_preloaded_state(preparsed, pre_state_json) {
+        let pre_state_path = if !preload_state {
+            block_path
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("pre_state").join(format!("{}.json", preparsed.block_number)))
+        } else {
+            None
+        };
+        
+        // Execute with appropriate state loading strategy
+        let result = if preload_state {
+            executor.execute_preparsed_block_with_preloaded_state(preparsed, pre_state_json)
+        } else {
+            executor.execute_preparsed_block_with_state(preparsed, pre_state_path.as_deref())
+        };
+        
+        match result {
             Ok(result) => {
                 println!("✓ Block {} completed: {} txs in {:.2}ms", 
                     result.block_number, 
