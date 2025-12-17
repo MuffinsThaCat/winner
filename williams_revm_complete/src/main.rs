@@ -24,12 +24,14 @@ mod tests;
 
 use anyhow::{Result, Context};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::time::Instant;
-use executor::{WilliamsExecutor, BlockExecutionResult, PreParsedBlock};
-use parallel_executor::WilliamsParallelExecutor;
+use std::collections::HashMap;
+use std::sync::Arc;
 use serde_json::Value;
 use rayon::prelude::*;
+use executor::{WilliamsExecutor, BlockExecutionResult, PreParsedBlock};
+use parallel_executor::WilliamsParallelExecutor;
 
 fn main() -> Result<()> {
     println!("{}", "=".repeat(70));
@@ -125,7 +127,7 @@ fn main() -> Result<()> {
     let results = if use_parallel {
         execute_parallel(&loaded_blocks, thread_count, rpc_url)?
     } else {
-        execute_sequential(&loaded_blocks, thread_count, rpc_url)?
+        execute_sequential(&loaded_blocks, thread_count, rpc_url, &PathBuf::from(&data_dir))?
     };
 
     let total_time = results.iter()
@@ -220,6 +222,7 @@ fn execute_sequential(
     loaded_blocks: &[(PathBuf, String, u64)],
     thread_count: usize,
     rpc_url: Option<String>,
+    data_dir: &Path,
 ) -> Result<Vec<BlockExecutionResult>> {
     let executor = if let Some(url) = rpc_url {
         WilliamsExecutor::with_rpc(thread_count, url)
@@ -228,8 +231,45 @@ fn execute_sequential(
     };
 
     // 🚀 OPTIMIZATION: Pre-parse ALL transactions in PARALLEL (ZERO JSON overhead in execution!)
-    println!("⚡ Pre-parsing all {} blocks in parallel (removing JSON from critical path)...", loaded_blocks.len());
-    let parse_start = Instant::now();
+    println!("  📊 Pre-parsing {} blocks to eliminate JSON overhead...", loaded_blocks.len());
+    let parse_start = std::time::Instant::now();
+    
+    // OPTIMIZATION: Pre-load ALL pre_state files into memory (one-time I/O cost)
+    println!("  📦 Pre-loading pre_state files into memory...");
+    let pre_state_dir = data_dir.join("pre_state");
+    let mut pre_state_cache: HashMap<u64, Arc<serde_json::Value>> = HashMap::new();
+    
+    if pre_state_dir.exists() {
+        let pre_state_files: Vec<_> = std::fs::read_dir(&pre_state_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+            .collect();
+        
+        let loaded: Vec<_> = pre_state_files
+            .par_iter()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let block_num = path.file_stem()?
+                    .to_str()?
+                    .parse::<u64>()
+                    .ok()?;
+                
+                let json_str = std::fs::read_to_string(&path).ok()?;
+                let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+                
+                Some((block_num, Arc::new(json)))
+            })
+            .collect();
+        
+        for (block_num, json) in loaded {
+            pre_state_cache.insert(block_num, json);
+        }
+        
+        println!("  ✓ Loaded {} pre_state files into memory", pre_state_cache.len());
+    }
     
     let preparsed_blocks: Vec<(PathBuf, PreParsedBlock)> = loaded_blocks
         .par_iter()
@@ -252,8 +292,11 @@ fn execute_sequential(
     for (idx, (block_path, preparsed)) in preparsed_blocks.iter().enumerate() {
         println!("[{}/{}] Processing: {:?}", idx + 1, preparsed_blocks.len(), block_path.file_name());
         
-        // Use the FAST PATH - zero JSON parsing overhead!
-        match executor.execute_preparsed_block(preparsed) {
+        // Get pre-loaded pre_state from cache (zero I/O overhead!)
+        let pre_state_json = pre_state_cache.get(&preparsed.block_number);
+        
+        // Use the FAST PATH - zero JSON parsing overhead, zero I/O overhead!
+        match executor.execute_preparsed_block_with_preloaded_state(preparsed, pre_state_json) {
             Ok(result) => {
                 println!("✓ Block {} completed: {} txs in {:.2}ms", 
                     result.block_number, 

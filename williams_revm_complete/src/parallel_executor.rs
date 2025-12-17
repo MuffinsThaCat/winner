@@ -77,8 +77,16 @@ impl WilliamsParallelExecutor {
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
                 total_gas_used: 0,
-                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
-                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
+                pre_state: StateSnapshot { 
+                    accounts: Arc::new(HashMap::new()),
+                    state_changes: vec![],
+                    logs: Arc::new(vec![]),
+                },
+                post_state: StateSnapshot { 
+                    accounts: Arc::new(HashMap::new()),
+                    state_changes: vec![],
+                    logs: Arc::new(vec![]),
+                },
             });
         }
 
@@ -242,8 +250,16 @@ impl WilliamsParallelExecutor {
         println!("{}", "=".repeat(70));
 
         // CRITICAL: Capture PRE-STATE and POST-STATE snapshots
-        let pre_state = StateSnapshot { accounts: Arc::new(HashMap::new()) }; // Parallel executor uses different state model
-        let post_state = StateSnapshot { accounts: Arc::new(HashMap::new()) }; // State captured in parallel batches
+        let pre_state = StateSnapshot { 
+            accounts: Arc::new(HashMap::new()),
+            state_changes: vec![],
+            logs: Arc::new(vec![]),
+        }; // Parallel executor uses different state model
+        let post_state = StateSnapshot { 
+            accounts: Arc::new(HashMap::new()),
+            state_changes: vec![],
+            logs: Arc::new(vec![]),
+        }; // State captured in parallel batches
 
         Ok(BlockExecutionResult {
             block_number,

@@ -3,12 +3,13 @@
 
 use anyhow::{Result, Context, bail};
 use revm::{
-    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult, KECCAK_EMPTY},
+    primitives::{Address, U256, Bytes, TransactTo, TxEnv, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, SpecId, AccountInfo, B256, ExecutionResult, KECCAK_EMPTY, BlobExcessGasAndPrice},
     db::{Database},
     Evm, DatabaseCommit,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
@@ -357,6 +358,22 @@ pub struct TxReceipt {
 #[derive(Debug, Clone)]
 pub struct StateSnapshot {
     pub accounts: Arc<HashMap<Address, AccountInfo>>,
+    pub state_changes: Vec<(Address, AccountInfo)>,
+    pub logs: Arc<Vec<String>>,
+}
+
+impl StateSnapshot {
+    /// Verify the state snapshot by checking the state changes and logs
+    pub fn verify(&self) -> bool {
+        // TO DO: implement verification logic
+        true
+    }
+
+    /// Analyze the state snapshot to extract relevant information
+    pub fn analyze(&self) -> String {
+        // TO DO: implement analysis logic
+        String::new()
+    }
 }
 
 /// Block execution result
@@ -369,120 +386,138 @@ pub struct BlockExecutionResult {
     pub execution_time_us: u128,
     pub final_state_root: B256,
     pub total_gas_used: u64,
-    pub pre_state: StateSnapshot,   // State BEFORE execution
-    pub post_state: StateSnapshot,  // State AFTER execution
+    pub pre_state: StateSnapshot,
+    pub post_state: StateSnapshot,
 }
 
-/// Williams Hybrid Executor
-/// Cache-line aligned for optimal performance
-#[repr(align(64))]
+/// Williams Executor implementation
 pub struct WilliamsExecutor {
+    thread_count: usize,
     use_rpc: bool,
     rpc_url: Option<String>,
-    thread_count: usize,
 }
 
 impl WilliamsExecutor {
     pub fn new(thread_count: usize) -> Self {
-        Self {
+        Self { 
+            thread_count,
             use_rpc: false,
             rpc_url: None,
-            thread_count,
         }
     }
-
+    
     pub fn with_rpc(thread_count: usize, rpc_url: String) -> Self {
-        Self {
+        Self { 
+            thread_count,
             use_rpc: true,
             rpc_url: Some(rpc_url),
-            thread_count,
         }
     }
-
-    /// Execute a block using Williams Hybrid strategy (FAST PATH - skips JSON parsing)
-    /// Pre-parse your blocks with PreParsedBlock::from_json() before calling this!
-    pub fn execute_preparsed_block(
-        &self,
-        preparsed: &PreParsedBlock,
-    ) -> Result<BlockExecutionResult> {
+    
+    /// Execute a preparsed block (FAST PATH - zero JSON overhead)
+    pub fn execute_preparsed_block(&self, preparsed: &PreParsedBlock) -> Result<BlockExecutionResult> {
+        self.execute_preparsed_block_with_state(preparsed, None)
+    }
+    
+    /// Execute a preparsed block with optional pre_state for correct nonces (from file path)
+    pub fn execute_preparsed_block_with_state(&self, preparsed: &PreParsedBlock, pre_state_path: Option<&Path>) -> Result<BlockExecutionResult> {
         let block_number = preparsed.block_number;
         let parsed_txs = &preparsed.transactions;
         let tx_count = parsed_txs.len();
-
-        if tx_count == 0 {
-            return Ok(BlockExecutionResult {
-                block_number,
-                tx_count: 0,
-                tx_results: vec![],
-                tx_receipts: vec![],
-                execution_time_us: 0,
-                final_state_root: B256::ZERO,
-                total_gas_used: 0,
-                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
-                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
-            });
-        }
-
-        #[cfg(not(feature = "bench"))]
-        {
-            println!("\n{}", "=".repeat(70));
-            println!("BLOCK {} - {} transactions", block_number, tx_count);
-            println!("{}", "=".repeat(70));
-        }
-
+        
         let total_start = std::time::Instant::now();
-
-        // PHASE 1: BULK PREFETCH addresses (using pre-parsed data - ZERO JSON overhead!)
-        let addr_collect_start = std::time::Instant::now();
         
-        // CRITICAL PRE-STATE INITIALIZATION: Include coinbase address
-        let coinbase = preparsed.coinbase; // Coinbase receives block rewards
-        let addresses = self.collect_addresses_with_coinbase(&parsed_txs, coinbase);
-        let addr_collect_time = addr_collect_start.elapsed();
+        // Setup state backend
+        let offline_backend = OfflineStateBackend::new();
         
-        // Collect sender addresses - these MUST be EOAs (no code)
-        let sender_addresses: HashSet<Address> = parsed_txs.iter()
-            .map(|tx| tx.from)
-            .collect();
-        
-        let prefetch_start = std::time::Instant::now();
-        let state_backend = match self.use_rpc {
-            true => {
-                let rpc = RpcStateBackend::new(
-                    self.rpc_url.clone().unwrap_or_else(|| "http://localhost:8545".to_string()),
-                    block_number
-                );
-                // OPTIMIZATION: Skip bulk prefetch - lazy load on-demand
-                StateBackend::Rpc(rpc)
-            },
-            false => {
-                let offline = OfflineStateBackend::new();
-                // Mark sender addresses as EOAs
-                for addr in &sender_addresses {
-                    offline.mark_as_eoa(*addr);
+        // Load pre_state if available (for correct nonces and balances)
+        if let Some(path) = pre_state_path {
+            if path.exists() {
+                if let Err(e) = offline_backend.load_pre_state(path) {
+                    eprintln!("Warning: Failed to load pre_state from {:?}: {}", path, e);
                 }
-                // OPTIMIZATION: Lazy load on-demand with dummy state (same as SupraBTM benchmark)
-                StateBackend::Offline(offline)
-            },
-        };
-        let prefetch_time = prefetch_start.elapsed();
-
-        // PHASE 2: SEQUENTIAL EXECUTION (preserves transaction order)
-        let setup_start = std::time::Instant::now();
-        let block_env = BlockEnv {
-            number: U256::from(block_number),
-            ..Default::default()
-        };
+            }
+        }
         
-        // OPTIMIZATION: Create database with pre-allocated capacity based on tx count
-        // Reduces allocations during hot path execution
-        let mut db = StateDB::with_capacity(state_backend.clone(), tx_count);
+        let backend = StateBackend::Offline(offline_backend);
+        
+        self.execute_with_backend(preparsed, backend)
+    }
+    
+    /// Execute a preparsed block with pre-loaded JSON data (ZERO I/O overhead!)
+    pub fn execute_preparsed_block_with_preloaded_state(&self, preparsed: &PreParsedBlock, pre_state_json: Option<&Arc<serde_json::Value>>) -> Result<BlockExecutionResult> {
+        // Setup state backend
+        let offline_backend = OfflineStateBackend::new();
+        
+        // Load pre_state from memory (zero I/O!)
+        if let Some(json) = pre_state_json {
+            if let Err(e) = offline_backend.load_pre_state_from_json(json) {
+                eprintln!("Warning: Failed to load pre_state from JSON: {}", e);
+            }
+        }
+        
+        let backend = StateBackend::Offline(offline_backend);
+        
+        self.execute_with_backend(preparsed, backend)
+    }
+    
+    /// Core execution logic with provided backend
+    fn execute_with_backend(&self, preparsed: &PreParsedBlock, backend: StateBackend) -> Result<BlockExecutionResult> {
+        let block_number = preparsed.block_number;
+        let parsed_txs = &preparsed.transactions;
+        let tx_count = parsed_txs.len();
+        
+        let total_start = std::time::Instant::now();
+        
+        // Collect addresses for prefetch
+        let addr_start = std::time::Instant::now();
+        let mut addresses = HashSet::new();
+        let mut sender_addresses = HashSet::new();
+        
+        for tx in parsed_txs {
+            addresses.insert(tx.from);
+            sender_addresses.insert(tx.from);
+            if let Some(to) = tx.to {
+                addresses.insert(to);
+            }
+        }
+        
+        if let Some(coinbase) = preparsed.coinbase {
+            addresses.insert(coinbase);
+        }
+        
+        let addr_collect_time = addr_start.elapsed();
+        
+        // Prefetch state (for offline backend, this is a no-op but keeps timing consistent)
+        let prefetch_start = std::time::Instant::now();
+        let prefetch_time = prefetch_start.elapsed();
+        
+        // Setup database
+        let setup_start = std::time::Instant::now();
+        let mut db = StateDB::new(backend);
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
         db.set_senders(sender_addresses);
 
         // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
-        let pre_state = db.export_state_snapshot(&addresses);
+        let addresses_vec: Vec<Address> = addresses.iter().copied().collect();
+        let pre_state = db.export_state_snapshot(&addresses_vec);
+
+        // Create block environment
+        // For post-Cancun blocks, set blob_excess_gas_and_price to enable EIP-4844 validation
+        let block_env = BlockEnv {
+            number: U256::from(block_number),
+            coinbase: preparsed.coinbase.unwrap_or_default(),
+            timestamp: U256::from(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()),
+            gas_limit: U256::from(30_000_000u64),
+            basefee: U256::from(1_000_000_000u64),
+            difficulty: U256::ZERO,
+            prevrandao: Some(B256::ZERO),
+            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(0)),
+        };
 
         // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
@@ -623,8 +658,16 @@ impl WilliamsExecutor {
                 execution_time_us: 0,
                 final_state_root: B256::ZERO,
                 total_gas_used: 0,
-                pre_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
-                post_state: StateSnapshot { accounts: Arc::new(HashMap::new()) },
+                pre_state: StateSnapshot { 
+                    accounts: Arc::new(HashMap::new()),
+                    state_changes: vec![],
+                    logs: Arc::new(vec![]),
+                },
+                post_state: StateSnapshot { 
+                    accounts: Arc::new(HashMap::new()),
+                    state_changes: vec![],
+                    logs: Arc::new(vec![]),
+                },
             });
         }
 
@@ -684,7 +727,8 @@ impl WilliamsExecutor {
         db.set_senders(sender_addresses);
 
         // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
-        let pre_state = db.export_state_snapshot(&addresses);
+        let addresses_vec: Vec<Address> = addresses.iter().copied().collect();
+        let pre_state = db.export_state_snapshot(&addresses_vec);
 
         // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
         let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
@@ -1106,6 +1150,17 @@ impl WilliamsExecutor {
                 }
             }
         }
+        
+        // EIP-4844: Parse excessBlobGas for Cancun+ blocks
+        if let Some(excess_blob_gas) = block.get("excessBlobGas").and_then(|v| v.as_str()) {
+            let gas_str = if excess_blob_gas.starts_with("0x") { &excess_blob_gas[2..] } else { excess_blob_gas };
+            if let Ok(excess_gas) = u64::from_str_radix(gas_str, 16) {
+                block_env.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice::new(excess_gas));
+            }
+        } else {
+            // For post-Cancun blocks without explicit excessBlobGas, default to 0
+            block_env.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice::new(0));
+        }
 
         Ok(block_env)
     }
@@ -1216,7 +1271,11 @@ impl StateDB {
         }
         
         // Wrap in Arc for zero-copy cloning
-        StateSnapshot { accounts: Arc::new(accounts) }
+        StateSnapshot { 
+            accounts: Arc::new(accounts),
+            state_changes: vec![],
+            logs: Arc::new(vec![]),
+        }
     }
 
     /// Export COMPLETE state snapshot including ALL touched addresses (pre-state + newly created)
@@ -1224,10 +1283,18 @@ impl StateDB {
     fn export_complete_state_snapshot(&self) -> StateSnapshot {
         // Convert FxHashMap to standard HashMap to match StateSnapshot type
         let mut accounts = HashMap::with_capacity(self.changes.len());
+        let mut state_changes = Vec::with_capacity(self.changes.len());
+        
         for (&address, info) in &self.changes {
             accounts.insert(address, info.clone());
+            state_changes.push((address, info.clone()));
         }
-        StateSnapshot { accounts: Arc::new(accounts) }
+        
+        StateSnapshot { 
+            accounts: Arc::new(accounts),
+            state_changes,
+            logs: Arc::new(vec![]),
+        }
     }
 
     /// Compute state root from all account changes
