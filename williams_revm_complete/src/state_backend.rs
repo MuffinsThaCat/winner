@@ -4,9 +4,11 @@
 use anyhow::{Result, Context};
 use revm::primitives::{Address, U256, Bytes, Bytecode, B256, AccountInfo, KECCAK_EMPTY};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use serde_json::{json, Value};
 use dashmap::DashMap;
+use std::path::Path;
 
 /// Real state backend that fetches from RPC
 #[derive(Clone)]
@@ -74,7 +76,7 @@ impl RpcStateBackend {
             .collect();
         
         // OPTIMIZATION: Batch insert using extend (single write lock, no loop overhead)
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         cache.extend(results.into_iter());
         drop(cache);
         
@@ -157,7 +159,7 @@ impl RpcStateBackend {
                 // Has code - compute hash
                 let code_bytes = hex::decode(code_str.trim_start_matches("0x")).unwrap_or_default();
                 let bytecode = Bytecode::new_raw(Bytes::from(code_bytes.clone()));
-                self.code_cache.write().unwrap().insert(address, bytecode);
+                self.code_cache.write().insert(address, bytecode);
                 revm::primitives::keccak256(&code_bytes)
             }
         } else {
@@ -175,19 +177,19 @@ impl RpcStateBackend {
     /// Get account info (from cache or fetch)
     pub fn get_account(&self, address: Address) -> Result<AccountInfo> {
         // Check cache first
-        if let Some(info) = self.cache.read().unwrap().get(&address) {
+        if let Some(info) = self.cache.read().get(&address) {
             return Ok(info.clone());
         }
         
         // Fetch if not in cache
         let info = self.fetch_account_info(address)?;
-        self.cache.write().unwrap().insert(address, info.clone());
+        self.cache.write().insert(address, info.clone());
         Ok(info)
     }
 
     /// Get code for an address
     pub fn get_code(&self, address: Address) -> Option<Bytecode> {
-        self.code_cache.read().unwrap().get(&address).cloned()
+        self.code_cache.read().get(&address).cloned()
     }
 
     /// Get storage value
@@ -195,7 +197,7 @@ impl RpcStateBackend {
         let key = (address, index);
         
         // Check cache
-        if let Some(value) = self.storage_cache.read().unwrap().get(&key) {
+        if let Some(value) = self.storage_cache.read().get(&key) {
             return Ok(*value);
         }
         
@@ -224,16 +226,16 @@ impl RpcStateBackend {
             U256::ZERO
         };
         
-        self.storage_cache.write().unwrap().insert(key, value);
+        self.storage_cache.write().insert(key, value);
         Ok(value)
     }
 
     /// Get cached state size (for reporting)
     pub fn cache_size(&self) -> (usize, usize, usize) {
         (
-            self.cache.read().unwrap().len(),
-            self.code_cache.read().unwrap().len(),
-            self.storage_cache.read().unwrap().len(),
+            self.cache.read().len(),
+            self.code_cache.read().len(),
+            self.storage_cache.read().len(),
         )
     }
 }
@@ -279,6 +281,60 @@ impl OfflineStateBackend {
             info.code = None;
             self.cache.insert(address, Arc::new(info));
         }
+    }
+
+    /// Load pre_state from JSON file for realistic benchmarking
+    pub fn load_pre_state(&self, pre_state_path: &Path) -> Result<usize> {
+        use std::fs;
+        use anyhow::Context;
+        
+        let json_str = fs::read_to_string(pre_state_path)
+            .context("Failed to read pre_state file")?;
+        
+        let json: Value = serde_json::from_str(&json_str)
+            .context("Failed to parse pre_state JSON")?;
+        
+        let mut loaded = 0;
+        
+        // Parse SupraBTM pre_state format: {"result": [{"result": {"0xaddr": {"balance": "0x...", "nonce": N}}}]}
+        if let Some(results) = json.get("result").and_then(|r| r.as_array()) {
+            for result_obj in results {
+                if let Some(accounts) = result_obj.get("result").and_then(|r| r.as_object()) {
+                    for (addr_str, account_data) in accounts {
+                        // Parse address
+                        let addr = Address::parse_checksummed(addr_str, None)
+                            .or_else(|_| addr_str.parse::<Address>())
+                            .with_context(|| format!("Invalid address: {}", addr_str))?;
+                        
+                        // Parse balance and nonce
+                        let balance_str = account_data.get("balance")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0x0");
+                        let balance = U256::from_str_radix(
+                            balance_str.trim_start_matches("0x"),
+                            16
+                        ).unwrap_or(U256::ZERO);
+                        
+                        let nonce = account_data.get("nonce")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        
+                        // Create AccountInfo with real state
+                        let info = AccountInfo {
+                            balance,
+                            nonce,
+                            code_hash: KECCAK_EMPTY,  // Pre_state doesn't include code
+                            code: None,
+                        };
+                        
+                        self.cache.insert(addr, Arc::new(info));
+                        loaded += 1;
+                    }
+                }
+            }
+        }
+        
+        Ok(loaded)
     }
 
     pub fn bulk_prefetch(&self, addresses: &[Address]) -> Result<()> {

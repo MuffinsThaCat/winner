@@ -59,8 +59,8 @@ opt-level = 3              # Maximum optimization
 lto = "fat"                # Full Link-Time Optimization across all crates
 codegen-units = 1          # Better optimization, slower compile
 panic = "abort"            # Smaller binary, faster unwinding
-strip = true               # Strip debug symbols
-debug = false              # No debug info in release
+strip = false              # Keep symbols for profiling
+debug = 1                  # Minimal debug info for profiling (line numbers)
 
 [profile.release.build-override]
 opt-level = 3
