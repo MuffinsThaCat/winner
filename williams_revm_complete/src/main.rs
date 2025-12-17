@@ -63,8 +63,12 @@ fn main() -> Result<()> {
     // Check for --parallel flag
     let use_parallel = args.contains(&"--parallel".to_string());
     
+    // Check for --fair-benchmark flag (disables ALL pre-loading for fair comparison)
+    let fair_benchmark = args.contains(&"--fair-benchmark".to_string());
+    
     // Check for --preload-state flag (default: true for benchmark performance)
-    let preload_state = !args.contains(&"--no-preload".to_string());
+    let preload_state = !args.contains(&"--no-preload".to_string()) && !fair_benchmark;
+    let preload_blocks = !fair_benchmark;
     
     let use_rpc = args.iter().any(|a| a == "--rpc");
     let rpc_url = if use_rpc {
@@ -81,7 +85,9 @@ fn main() -> Result<()> {
     println!("  Thread count:   {}", thread_count);
     println!("  Execution mode: {}", if use_parallel { "PARALLEL (Sequential+Parallel Hybrid)" } else { "Sequential" });
     println!("  State backend:  {}", if use_rpc { "RPC" } else { "Offline (default balances)" });
-    println!("  State loading:  {}", if preload_state { "Pre-loaded (optimized)" } else { "On-demand (realistic)" });
+    println!("  Benchmark mode: {}", if fair_benchmark { "FAIR (I/O included in timing)" } else { "OPTIMIZED (I/O excluded)" });
+    println!("  Block loading:  {}", if preload_blocks { "Pre-loaded" } else { "On-demand" });
+    println!("  State loading:  {}", if preload_state { "Pre-loaded" } else { "On-demand" });
     if let Some(ref url) = rpc_url {
         println!("  RPC URL:        {}", url);
     }
@@ -110,22 +116,36 @@ fn main() -> Result<()> {
     let test_blocks: Vec<_> = block_files.iter().take(500).cloned().collect();
     println!("Testing with {} blocks\n", test_blocks.len());
 
-    // OPTIMIZATION: Pre-load ALL block files in parallel into memory
-    println!("⚡ Pre-loading all block files into memory (parallel)...");
-    let preload_start = Instant::now();
-    
-    let loaded_blocks: Vec<(PathBuf, String, u64)> = test_blocks
-        .par_iter()
-        .filter_map(|block_path| {
-            let block_data = fs::read_to_string(block_path).ok()?;
-            let block_number = extract_block_number(block_path).ok()?;
-            Some((block_path.clone(), block_data, block_number))
-        })
-        .collect();
-    
-    println!("✓ Pre-loaded {} blocks in {:.2}ms", loaded_blocks.len(), preload_start.elapsed().as_secs_f64() * 1000.0);
-    println!("  Avg load time: {:.3}ms per block", preload_start.elapsed().as_secs_f64() * 1000.0 / loaded_blocks.len() as f64);
-    println!();
+    // Conditionally pre-load block files based on benchmark mode
+    let loaded_blocks: Vec<(PathBuf, String, u64)> = if preload_blocks {
+        println!("⚡ Pre-loading all block files into memory (parallel)...");
+        let preload_start = Instant::now();
+        
+        let blocks = test_blocks
+            .par_iter()
+            .filter_map(|block_path| {
+                let block_data = fs::read_to_string(block_path).ok()?;
+                let block_number = extract_block_number(block_path).ok()?;
+                Some((block_path.clone(), block_data, block_number))
+            })
+            .collect();
+        
+        println!("✓ Pre-loaded {} blocks in {:.2}ms", test_blocks.len(), preload_start.elapsed().as_secs_f64() * 1000.0);
+        println!("  Avg load time: {:.3}ms per block", preload_start.elapsed().as_secs_f64() * 1000.0 / test_blocks.len() as f64);
+        println!();
+        blocks
+    } else {
+        println!("📂 Fair benchmark mode: Loading blocks on-demand (I/O included in timing)");
+        println!();
+        // Create empty entries - will be loaded on-demand
+        test_blocks
+            .iter()
+            .filter_map(|block_path| {
+                let block_number = extract_block_number(block_path).ok()?;
+                Some((block_path.clone(), String::new(), block_number))
+            })
+            .collect()
+    };
 
     // Execute blocks based on mode
     let results = if use_parallel {
@@ -235,74 +255,84 @@ fn execute_sequential(
         WilliamsExecutor::new(thread_count)
     };
 
-    // 🚀 OPTIMIZATION: Pre-parse ALL transactions in PARALLEL (ZERO JSON overhead in execution!)
-    println!("  📊 Pre-parsing {} blocks to eliminate JSON overhead...", loaded_blocks.len());
-    let parse_start = std::time::Instant::now();
+    // Check if blocks are pre-loaded (block_data is not empty)
+    let blocks_preloaded = loaded_blocks.first().map(|(_, data, _)| !data.is_empty()).unwrap_or(false);
     
-    // OPTIMIZATION: Pre-load ALL pre_state files into memory (one-time I/O cost)
-    let mut pre_state_cache: HashMap<u64, Arc<serde_json::Value>> = HashMap::new();
-    
-    if preload_state {
-        println!("  📦 Pre-loading pre_state files into memory (optimized mode)...");
-        let pre_state_dir = data_dir.join("pre_state");
-    
-    if pre_state_dir.exists() {
-        let pre_state_files: Vec<_> = std::fs::read_dir(&pre_state_dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
-            .collect();
+    let (preparsed_blocks, pre_state_cache) = if blocks_preloaded {
+        // OPTIMIZED MODE: Pre-parse and pre-load
+        println!("  📊 Pre-parsing {} blocks to eliminate JSON overhead...", loaded_blocks.len());
+        let parse_start = std::time::Instant::now();
         
-        let loaded: Vec<_> = pre_state_files
+        let mut cache: HashMap<u64, Arc<serde_json::Value>> = HashMap::new();
+        
+        if preload_state {
+            println!("  📦 Pre-loading pre_state files into memory (optimized mode)...");
+            let pre_state_dir = data_dir.join("pre_state");
+        
+            if pre_state_dir.exists() {
+                let pre_state_files: Vec<_> = std::fs::read_dir(&pre_state_dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+                    .collect();
+                
+                let loaded: Vec<_> = pre_state_files
+                    .par_iter()
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        let block_num = path.file_stem()?
+                            .to_str()?
+                            .parse::<u64>()
+                            .ok()?;
+                        
+                        let json_str = std::fs::read_to_string(&path).ok()?;
+                        let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+                        
+                        Some((block_num, Arc::new(json)))
+                    })
+                    .collect();
+                
+                for (block_num, json) in loaded {
+                    cache.insert(block_num, json);
+                }
+                
+                println!("  ✓ Loaded {} pre_state files into memory", cache.len());
+            }
+        }
+        
+        let parsed: Vec<(PathBuf, PreParsedBlock)> = loaded_blocks
             .par_iter()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let block_num = path.file_stem()?
-                    .to_str()?
-                    .parse::<u64>()
-                    .ok()?;
-                
-                let json_str = std::fs::read_to_string(&path).ok()?;
-                let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-                
-                Some((block_num, Arc::new(json)))
+            .filter_map(|(block_path, block_data, block_number)| {
+                let json: Value = serde_json::from_str(block_data).ok()?;
+                let preparsed = PreParsedBlock::from_json(&json, *block_number).ok()?;
+                Some((block_path.clone(), preparsed))
             })
             .collect();
         
-        for (block_num, json) in loaded {
-            pre_state_cache.insert(block_num, json);
-        }
+        println!("✓ Pre-parsed {} blocks in {:.2}ms (avg {:.3}ms/block)", 
+            parsed.len(),
+            parse_start.elapsed().as_secs_f64() * 1000.0,
+            parse_start.elapsed().as_secs_f64() * 1000.0 / parsed.len() as f64
+        );
+        println!("  → JSON parsing now ZERO cost in execution timing! 🎯\n");
         
-            println!("  ✓ Loaded {} pre_state files into memory", pre_state_cache.len());
-        }
+        (parsed, cache)
     } else {
-        println!("  📂 Loading pre_state files on-demand (realistic mode)...");
-    }
-    
-    let preparsed_blocks: Vec<(PathBuf, PreParsedBlock)> = loaded_blocks
-        .par_iter()
-        .filter_map(|(block_path, block_data, block_number)| {
-            let json: Value = serde_json::from_str(block_data).ok()?;
-            let preparsed = PreParsedBlock::from_json(&json, *block_number).ok()?;
-            Some((block_path.clone(), preparsed))
-        })
-        .collect();
-    
-    println!("✓ Pre-parsed {} blocks in {:.2}ms (avg {:.3}ms/block)", 
-        preparsed_blocks.len(),
-        parse_start.elapsed().as_secs_f64() * 1000.0,
-        parse_start.elapsed().as_secs_f64() * 1000.0 / preparsed_blocks.len() as f64
-    );
-    println!("  → JSON parsing now ZERO cost in execution timing! 🎯\n");
+        // FAIR MODE: No pre-parsing, load on-demand
+        println!("  ⚖️  Fair benchmark mode: I/O and parsing will be included in timing\n");
+        (Vec::new(), HashMap::new())
+    };
 
     let mut results = Vec::new();
     
-    for (idx, (block_path, preparsed)) in preparsed_blocks.iter().enumerate() {
-        println!("[{}/{}] Processing: {:?}", idx + 1, preparsed_blocks.len(), block_path.file_name());
-        
-        // Get pre-state: either from cache (fast) or will load from disk (realistic)
+    if blocks_preloaded {
+        // OPTIMIZED PATH: Use pre-parsed blocks
+        for (idx, (block_path, preparsed)) in preparsed_blocks.iter().enumerate() {
+            println!("[{}/{}] Processing: {:?}", idx + 1, preparsed_blocks.len(), block_path.file_name());
+            
+            // Get pre-state: either from cache (fast) or will load from disk (realistic)
         let pre_state_json = if preload_state {
             pre_state_cache.get(&preparsed.block_number)
         } else {
@@ -336,6 +366,44 @@ fn execute_sequential(
             }
             Err(e) => {
                 println!("✗ Block {} failed: {}", preparsed.block_number, e);
+            }
+        }
+    }
+    } else {
+        // FAIR BENCHMARK PATH: Load and parse on-demand (I/O included in timing)
+        for (idx, (block_path, _, block_number)) in loaded_blocks.iter().enumerate() {
+            println!("[{}/{}] Processing: {:?}", idx + 1, loaded_blocks.len(), block_path.file_name());
+            
+            // Load block file (I/O included in timing)
+            let block_data = std::fs::read_to_string(block_path)?;
+            let json: Value = serde_json::from_str(&block_data)?;
+            let preparsed = PreParsedBlock::from_json(&json, *block_number)?;
+            
+            // Load pre_state if available (I/O included in timing)
+            let pre_state_path = if !preload_state {
+                block_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("pre_state").join(format!("{}.json", block_number)))
+            } else {
+                None
+            };
+            
+            // Execute with on-demand state loading
+            let result = executor.execute_preparsed_block_with_state(&preparsed, pre_state_path.as_deref());
+            
+            match result {
+                Ok(result) => {
+                    println!("✓ Block {} completed: {} txs in {:.2}ms", 
+                        result.block_number, 
+                        result.tx_count,
+                        result.execution_time_us as f64 / 1000.0
+                    );
+                    results.push(result);
+                }
+                Err(e) => {
+                    println!("✗ Block {} failed: {}", block_number, e);
+                }
             }
         }
     }
