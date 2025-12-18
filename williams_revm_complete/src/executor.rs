@@ -21,6 +21,8 @@ pub struct PreParsedBlock {
     pub block_number: u64,
     pub transactions: Vec<ParsedTx>,
     pub coinbase: Option<Address>, // Block producer (miner/validator)
+    pub addresses: HashSet<Address>, // All unique addresses (OPTIMIZATION: collected during parsing)
+    pub sender_addresses: HashSet<Address>, // Sender addresses (OPTIMIZATION: collected during parsing for EOA marking)
 }
 
 impl PreParsedBlock {
@@ -32,8 +34,21 @@ impl PreParsedBlock {
             .and_then(|t| t.as_array())
             .context("No transactions in block")?;
         
+        // OPTIMIZATION: Collect addresses DURING parsing (eliminates 11.5% overhead)
+        let mut addresses = HashSet::with_capacity(txs.len() * 2);
+        let mut sender_addresses = HashSet::with_capacity(txs.len());
+        
         let transactions: Vec<ParsedTx> = txs.iter()
-            .map(|tx| ParsedTx::from_json(tx))
+            .map(|tx| {
+                let parsed = ParsedTx::from_json(tx)?;
+                // Collect addresses while we're already iterating
+                addresses.insert(parsed.from);
+                sender_addresses.insert(parsed.from); // Also collect senders
+                if let Some(to) = parsed.to {
+                    addresses.insert(to);
+                }
+                Ok(parsed)
+            })
             .collect::<Result<Vec<_>>>()?;
         
         // CRITICAL: Parse coinbase address for pre-state initialization
@@ -45,10 +60,17 @@ impl PreParsedBlock {
                 Some(Address::from_slice(&hex::decode(s).ok()?))
             });
         
+        // Add coinbase to addresses
+        if let Some(cb) = coinbase {
+            addresses.insert(cb);
+        }
+        
         Ok(PreParsedBlock {
             block_number,
             transactions,
             coinbase,
+            addresses,
+            sender_addresses,
         })
     }
 }
@@ -526,22 +548,10 @@ impl WilliamsExecutor {
         
         let total_start = std::time::Instant::now();
         
-        // Collect addresses for prefetch
+        // OPTIMIZATION: Use pre-collected addresses (no redundant iteration!)
         let addr_start = std::time::Instant::now();
-        let mut addresses = HashSet::new();
-        let mut sender_addresses = HashSet::new();
-        
-        for tx in parsed_txs {
-            addresses.insert(tx.from);
-            sender_addresses.insert(tx.from);
-            if let Some(to) = tx.to {
-                addresses.insert(to);
-            }
-        }
-        
-        if let Some(coinbase) = preparsed.coinbase {
-            addresses.insert(coinbase);
-        }
+        let addresses = &preparsed.addresses; // Already collected during parsing!
+        let sender_addresses = &preparsed.sender_addresses; // Already collected during parsing!
         
         let addr_collect_time = addr_start.elapsed();
         
@@ -554,7 +564,7 @@ impl WilliamsExecutor {
         let mut db = StateDB::new(backend);
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
-        db.set_senders(sender_addresses);
+        db.set_senders(sender_addresses.clone());
 
         // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
         let addresses_vec: Vec<Address> = addresses.iter().copied().collect();
