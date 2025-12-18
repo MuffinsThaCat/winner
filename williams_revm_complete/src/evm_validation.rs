@@ -27,14 +27,20 @@ pub fn verify_signature(
         use secp256k1::{Message, PublicKey, ecdsa::Signature, Secp256k1};
         
         // Adjust v for chain_id (EIP-155)
+        // EIP-155 encoding: v = chain_id * 2 + 35 + recovery_id
+        // Legacy encoding: v = 27 + recovery_id
         let recovery_id = if let Some(cid) = chain_id {
             if v >= 35 {
-                ((v - 35) % 2) as u8
+                // EIP-155: extract recovery_id = v - chain_id * 2 - 35
+                let v_base = cid * 2 + 35;
+                (v.saturating_sub(v_base)) as u8
             } else {
-                (v - 27) as u8
+                // Legacy with chain_id set: v = 27 + recovery_id
+                v.saturating_sub(27) as u8
             }
         } else {
-            (v - 27) as u8
+            // No chain_id: legacy encoding v = 27 + recovery_id
+            v.saturating_sub(27) as u8
         };
         
         if recovery_id > 3 {
