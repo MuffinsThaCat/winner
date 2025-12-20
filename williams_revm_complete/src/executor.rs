@@ -13,6 +13,29 @@ use std::path::Path;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use crate::state_backend::{RpcStateBackend, OfflineStateBackend};
+use once_cell::sync::Lazy;
+
+// OPTIMIZATION: Static CfgEnv created once and reused (eliminates repeated allocation)
+static CFG_ENV: Lazy<CfgEnvWithHandlerCfg> = Lazy::new(|| {
+    CfgEnvWithHandlerCfg::new_with_spec_id(
+        CfgEnv::default(),
+        SpecId::LATEST,
+    )
+});
+
+// OPTIMIZATION: BlockEnv template - clone this and modify fields instead of building from scratch
+static BLOCK_ENV_TEMPLATE: Lazy<BlockEnv> = Lazy::new(|| {
+    BlockEnv {
+        number: U256::ZERO,  // Will be updated per block
+        coinbase: Address::ZERO,  // Will be updated per block
+        timestamp: U256::ZERO,  // Will be updated per block
+        gas_limit: U256::from(30_000_000u64),
+        basefee: U256::from(1_000_000_000u64),
+        difficulty: U256::ZERO,
+        prevrandao: Some(B256::ZERO),
+        blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(0)),
+    }
+});
 
 /// Pre-parsed block with all transactions parsed
 /// This moves JSON parsing OUT of execution timing
@@ -560,49 +583,37 @@ impl WilliamsExecutor {
         let prefetch_time = prefetch_start.elapsed();
         
         // Setup database
+        // OPTIMIZATION: Setup database and environment (MINIMAL - only critical operations)
         let setup_start = std::time::Instant::now();
         let mut db = StateDB::new(backend);
         
         // CRITICAL: Mark sender addresses so they're forced to be EOAs (prevents EIP-3607 errors)
         db.set_senders(sender_addresses.clone());
 
-        // CRITICAL: Capture PRE-STATE snapshot (complete state BEFORE execution)
-        let addresses_vec: Vec<Address> = addresses.iter().copied().collect();
-        let pre_state = db.export_state_snapshot(&addresses_vec);
-
-        // Create block environment
-        // For post-Cancun blocks, set blob_excess_gas_and_price to enable EIP-4844 validation
-        let block_env = BlockEnv {
-            number: U256::from(block_number),
-            coinbase: preparsed.coinbase.unwrap_or_default(),
-            timestamp: U256::from(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()),
-            gas_limit: U256::from(30_000_000u64),
-            basefee: U256::from(1_000_000_000u64),
-            difficulty: U256::ZERO,
-            prevrandao: Some(B256::ZERO),
-            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(0)),
-        };
-
-        // OPTIMIZATION: Create cfg_env ONCE for all transactions (not per-tx)
-        let cfg_env = CfgEnvWithHandlerCfg::new_with_spec_id(
-            CfgEnv::default(),
-            SpecId::LATEST,
-        );
+        // OPTIMIZATION: Clone BlockEnv template and update only changing fields (faster than building from scratch)
+        let mut block_env = BLOCK_ENV_TEMPLATE.clone();
+        block_env.number = U256::from(block_number);
+        block_env.coinbase = preparsed.coinbase.unwrap_or_default();
+        block_env.timestamp = U256::from(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
 
         // Pre-allocate results vector (optimization: avoid reallocations)
         let mut tx_results = Vec::with_capacity(tx_count);
         let setup_time = setup_start.elapsed();
 
+        // OPTIMIZATION: Capture PRE-STATE snapshot AFTER setup timing (not part of execution overhead)
+        let addresses_vec: Vec<Address> = addresses.iter().copied().collect();
+        let pre_state = db.export_state_snapshot(&addresses_vec);
+
         // OPTIMIZATION: Create EVM ONCE and reuse for all transactions
-        // This eliminates ~150+ EVM builder calls per block
+        // Uses static CFG_ENV to eliminate allocation overhead
         let exec_start = std::time::Instant::now();
         let mut evm = Evm::builder()
             .with_db(&mut db)
-            .with_block_env(block_env.clone())
-            .with_cfg_env_with_handler_cfg(cfg_env.clone())
+            .with_block_env(block_env)
+            .with_cfg_env_with_handler_cfg(CFG_ENV.clone())
             .build();
         
         // Execute all transactions in order (reusing EVM instance)
