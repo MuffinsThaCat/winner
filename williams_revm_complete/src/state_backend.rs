@@ -560,12 +560,35 @@ impl OfflineStateBackend {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         
-                        // Create AccountInfo with real state
+                        // Parse bytecode if present
+                        let (code_hash, code) = if let Some(code_str) = account_data.get("code").and_then(|v| v.as_str()) {
+                            if code_str == "0x" || code_str.is_empty() {
+                                // No code - this is an EOA
+                                (KECCAK_EMPTY, None)
+                            } else {
+                                // Decode bytecode
+                                let code_bytes = hex::decode(code_str.trim_start_matches("0x")).unwrap_or_default();
+                                if code_bytes.is_empty() {
+                                    (KECCAK_EMPTY, None)
+                                } else {
+                                    // Compute code hash and store bytecode
+                                    let hash = revm::primitives::keccak256(&code_bytes);
+                                    let bytecode = Bytecode::new_raw(Bytes::from(code_bytes));
+                                    self.bytecode.insert(hash, bytecode.clone());
+                                    (hash, Some(bytecode))
+                                }
+                            }
+                        } else {
+                            // No code field - assume EOA
+                            (KECCAK_EMPTY, None)
+                        };
+                        
+                        // Create AccountInfo with real state INCLUDING bytecode
                         let info = AccountInfo {
                             balance,
                             nonce,
-                            code_hash: KECCAK_EMPTY,  // Pre_state doesn't include code
-                            code: None,
+                            code_hash,
+                            code,
                         };
                         
                         self.cache.insert(addr, Arc::new(info));
@@ -605,12 +628,35 @@ impl OfflineStateBackend {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         
-                        // Create AccountInfo with real state
+                        // Parse bytecode if present
+                        let (code_hash, code) = if let Some(code_str) = account_data.get("code").and_then(|v| v.as_str()) {
+                            if code_str == "0x" || code_str.is_empty() {
+                                // No code - this is an EOA
+                                (KECCAK_EMPTY, None)
+                            } else {
+                                // Decode bytecode
+                                let code_bytes = hex::decode(code_str.trim_start_matches("0x")).unwrap_or_default();
+                                if code_bytes.is_empty() {
+                                    (KECCAK_EMPTY, None)
+                                } else {
+                                    // Compute code hash and store bytecode
+                                    let hash = revm::primitives::keccak256(&code_bytes);
+                                    let bytecode = Bytecode::new_raw(Bytes::from(code_bytes));
+                                    self.bytecode.insert(hash, bytecode.clone());
+                                    (hash, Some(bytecode))
+                                }
+                            }
+                        } else {
+                            // No code field - assume EOA
+                            (KECCAK_EMPTY, None)
+                        };
+                        
+                        // Create AccountInfo with real state INCLUDING bytecode
                         let info = AccountInfo {
                             balance,
                             nonce,
-                            code_hash: KECCAK_EMPTY,
-                            code: None,
+                            code_hash,
+                            code,
                         };
                         
                         self.cache.insert(addr, Arc::new(info));
