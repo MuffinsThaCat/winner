@@ -3414,6 +3414,7 @@ dependencies = [
  "hex",
  "lru",
  "mimalloc",
+ "once_cell",
  "parking_lot",
  "prometheus",
  "proptest",
